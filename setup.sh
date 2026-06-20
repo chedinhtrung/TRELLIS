@@ -71,6 +71,12 @@ if [ "$NEW_ENV" = true ] ; then
     conda create -n trellis python=3.10
     conda activate trellis
     conda install pytorch==2.4.0 torchvision==0.19.0 pytorch-cuda=11.8 -c pytorch -c nvidia
+else 
+    apt update
+    apt install -y python3.11 python3.11-venv python3.11-dev
+    python3.11 -m venv /workspace/venv
+    source /workspace/venv/bin/activate
+    pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 fi
 
 # Get system information
@@ -150,9 +156,9 @@ if [ "$XFORMERS" = true ] ; then
                 2.5.0) pip install xformers==0.0.28.post2 --index-url https://download.pytorch.org/whl/cu121 ;;
                 *) echo "[XFORMERS] Unsupported PyTorch & CUDA version: $PYTORCH_VERSION & $CUDA_VERSION" ;;
             esac
-        elif [ "$CUDA_VERSION" = "12.4" ] ; then
+        elif [ "$CUDA_VERSION" = "12.8" ] ; then
             case $PYTORCH_VERSION in
-                2.5.0) pip install xformers==0.0.28.post2 --index-url https://download.pytorch.org/whl/cu124 ;;
+                2.7.0+cu128) pip install xformers==0.0.30 --index-url https://download.pytorch.org/whl/cu128 ;;
                 *) echo "[XFORMERS] Unsupported PyTorch & CUDA version: $PYTORCH_VERSION & $CUDA_VERSION" ;;
             esac
         else
@@ -194,7 +200,7 @@ if [ "$KAOLIN" = true ] ; then
             2.2.0) pip install kaolin -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.2.0_cu118.html;;
             2.2.1) pip install kaolin -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.2.1_cu118.html;;
             2.2.2) pip install kaolin -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.2.2_cu118.html;;
-            2.4.0) pip install kaolin -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.4.0_cu121.html;;
+            2.7.0+cu128) pip install kaolin -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.7.0_cu128.html;;
             *) echo "[KAOLIN] Unsupported PyTorch version: $PYTORCH_VERSION" ;;
         esac
     else
@@ -206,7 +212,7 @@ if [ "$NVDIFFRAST" = true ] ; then
     if [ "$PLATFORM" = "cuda" ] ; then
         mkdir -p /tmp/extensions
         git clone https://github.com/NVlabs/nvdiffrast.git /tmp/extensions/nvdiffrast
-        pip install /tmp/extensions/nvdiffrast
+        pip install /tmp/extensions/nvdiffrast --no-build-isolation
     else
         echo "[NVDIFFRAST] Unsupported platform: $PLATFORM"
     fi
@@ -216,7 +222,7 @@ if [ "$DIFFOCTREERAST" = true ] ; then
     if [ "$PLATFORM" = "cuda" ] ; then
         mkdir -p /tmp/extensions
         git clone --recurse-submodules https://github.com/JeffreyXiang/diffoctreerast.git /tmp/extensions/diffoctreerast
-        pip install /tmp/extensions/diffoctreerast
+        pip install /tmp/extensions/diffoctreerast --no-build-isolation
     else
         echo "[DIFFOCTREERAST] Unsupported platform: $PLATFORM"
     fi
@@ -226,7 +232,7 @@ if [ "$MIPGAUSSIAN" = true ] ; then
     if [ "$PLATFORM" = "cuda" ] ; then
         mkdir -p /tmp/extensions
         git clone https://github.com/autonomousvision/mip-splatting.git /tmp/extensions/mip-splatting
-        pip install /tmp/extensions/mip-splatting/submodules/diff-gaussian-rasterization/
+        pip install /tmp/extensions/mip-splatting/submodules/diff-gaussian-rasterization/ --no-build-isolation
     else
         echo "[MIPGAUSSIAN] Unsupported platform: $PLATFORM"
     fi

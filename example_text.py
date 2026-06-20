@@ -14,7 +14,7 @@ pipeline.cuda()
 
 # Run the pipeline
 outputs = pipeline.run(
-    "A chair looking like a avocado.",
+    "A chair looking like a volcano.",
     seed=1,
     # Optional parameters
     # sparse_structure_sampler_params={
