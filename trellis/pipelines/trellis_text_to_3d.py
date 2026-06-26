@@ -13,6 +13,10 @@ class TrellisTextTo3DPipeline(Pipeline):
     """
     Pipeline for inferring Trellis text-to-3D models.
 
+    The text pipeline mirrors the image pipeline, but CLIP hidden states replace
+    DINOv2 image tokens as cross-attention context. Both the structure flow and
+    the SLAT flow see the same prompt conditioning and CFG negative conditioning.
+
     Args:
         models (dict[str, nn.Module]): The models to use in the pipeline.
         sparse_structure_sampler (samplers.Sampler): The sampler for the sparse structure.
@@ -86,6 +90,8 @@ class TrellisTextTo3DPipeline(Pipeline):
         assert isinstance(text, list) and all(isinstance(t, str) for t in text), "text must be a list of strings"
         encoding = self.text_cond_model['tokenizer'](text, max_length=77, padding='max_length', truncation=True, return_tensors='pt')
         tokens = encoding['input_ids'].cuda()
+        # CLIP text produces [B, 77, C] hidden states. These tokens are not pooled:
+        # transformer cross-attention can attend to all positions in the prompt.
         embeddings = self.text_cond_model['model'](input_ids=tokens).last_hidden_state
         
         return embeddings
@@ -121,7 +127,8 @@ class TrellisTextTo3DPipeline(Pipeline):
             num_samples (int): The number of samples to generate.
             sampler_params (dict): Additional parameters for the sampler.
         """
-        # Sample occupancy latent
+        # Stage 1: sample dense structure latent [B, C_s, R, R, R] conditioned on
+        # CLIP text tokens. This stage controls where later sparse features exist.
         flow_model = self.models['sparse_structure_flow_model']
         reso = flow_model.resolution
         noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
@@ -134,7 +141,8 @@ class TrellisTextTo3DPipeline(Pipeline):
             verbose=True
         ).samples
         
-        # Decode occupancy latent
+        # Decode to occupancy logits and keep positive voxels as sparse coordinates.
+        # argwhere gives (batch, channel, x, y, z), so remove the singleton channel.
         decoder = self.models['sparse_structure_decoder']
         coords = torch.argwhere(decoder(z_s)>0)[:, [0, 2, 3, 4]].int()
 
@@ -178,7 +186,8 @@ class TrellisTextTo3DPipeline(Pipeline):
             coords (torch.Tensor): The coordinates of the sparse structure.
             sampler_params (dict): Additional parameters for the sampler.
         """
-        # Sample structured latent
+        # Stage 2: generate per-voxel SLAT features on the fixed sparse coordinate
+        # set from the structure stage. The SLAT flow changes feats, not coords.
         flow_model = self.models['slat_flow_model']
         noise = sp.SparseTensor(
             feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
@@ -193,6 +202,8 @@ class TrellisTextTo3DPipeline(Pipeline):
             verbose=True
         ).samples
 
+        # Undo dataset-level SLAT normalization before feeding latent features to
+        # representation decoders.
         std = torch.tensor(self.slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
@@ -244,6 +255,8 @@ class TrellisTextTo3DPipeline(Pipeline):
         mesh.vertices = o3d.utility.Vector3dVector(vertices)
         voxel_grid = o3d.geometry.VoxelGrid.create_from_triangle_mesh_within_bounds(mesh, voxel_size=1/64, min_bound=(-0.5, -0.5, -0.5), max_bound=(0.5, 0.5, 0.5))
         vertices = np.array([voxel.grid_index for voxel in voxel_grid.get_voxels()])
+        # Variant generation treats these voxel indices as the known structure and
+        # skips the structure-flow sampler. Batch indices are added in run_variant().
         return torch.tensor(vertices).int().cuda()
 
     @torch.no_grad()

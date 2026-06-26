@@ -130,6 +130,9 @@ class ModulatedTransformerCrossBlock(nn.Module):
             )
 
     def _forward(self, x: torch.Tensor, mod: torch.Tensor, context: torch.Tensor):
+        # Dense DiT block used by the structure flow. x is [B, tokens, channels],
+        # mod is a timestep-derived vector [B, channels], and context is text/image
+        # conditioning [B or 1, context_tokens, ctx_channels].
         if self.share_mod:
             shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = mod.chunk(6, dim=1)
         else:
@@ -140,6 +143,8 @@ class ModulatedTransformerCrossBlock(nn.Module):
         h = h * gate_msa.unsqueeze(1)
         x = x + h
         h = self.norm2(x)
+        # This cross-attention is the main conditioning injection point for dense
+        # structure generation.
         h = self.cross_attn(h, context)
         x = x + h
         h = self.norm3(x)

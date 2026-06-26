@@ -17,6 +17,11 @@ __all__ = [
 class SparseTensor:
     """
     Sparse tensor with support for both torchsparse and spconv backends.
+
+    TRELLIS represents sparse voxel data as two aligned arrays: `coords` with shape
+    [num_points, 4] storing (batch, x, y, z), and `feats` with shape
+    [num_points, ...] storing the feature vector/value at each active coordinate.
+    Most model layers preserve coords and replace feats.
     
     Parameters:
     - feats (torch.Tensor): Features of the sparse tensor.
@@ -69,6 +74,8 @@ class SparseTensor:
             if shape is None:
                 shape = self.__cal_shape(feats, coords)
             if layout is None:
+                # layout[i] is the contiguous slice of rows belonging to batch i.
+                # Many losses/decoders use it to process each sample independently.
                 layout = self.__cal_layout(coords, shape[0])
             if BACKEND == 'torchsparse':
                 self.data = SparseTensorData(feats, coords, **kwargs)
@@ -228,6 +235,8 @@ class SparseTensor:
         return self.replace(new_feats, new_coords)
 
     def dense(self) -> torch.Tensor:
+        # Convert to a dense backend tensor. This is useful for debugging but can be
+        # very memory-heavy at high voxel resolution.
         if BACKEND == 'torchsparse':
             return self.data.dense()
         elif BACKEND == 'spconv':
@@ -241,6 +250,9 @@ class SparseTensor:
         return sparse_unbind(self, dim)
 
     def replace(self, feats: torch.Tensor, coords: Optional[torch.Tensor] = None) -> 'SparseTensor':
+        # Core helper used throughout sparse models: create a new SparseTensor with
+        # updated features, preserving backend caches/layout when coordinates do not
+        # change. This is why most layers call x.replace(new_feats).
         new_shape = [self.shape[0]]
         new_shape.extend(feats.shape[1:])
         if BACKEND == 'torchsparse':

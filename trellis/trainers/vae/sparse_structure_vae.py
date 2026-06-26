@@ -70,6 +70,9 @@ class SparseStructureVaeTrainer(BasicTrainer):
             a dict with the key "loss" containing a scalar tensor.
             may also contain other keys for different terms.
         """
+        # ss is a dense binary occupancy-like grid [B, 1, R, R, R]. The VAE learns
+        # a compact latent whose decoder logits are thresholded during inference to
+        # create sparse coordinates for the SLAT stage.
         z, mean, logvar = self.training_models['encoder'](ss.float(), sample_posterior=True, return_raw=True)
         logits = self.training_models['decoder'](z)
 
@@ -86,6 +89,9 @@ class SparseStructureVaeTrainer(BasicTrainer):
             terms["loss"] = terms["loss"] + terms["dice"]
         else:
             raise ValueError(f'Invalid loss type {self.loss_type}')
+        # KL regularizes the structure latent posterior toward N(0, I). For richer
+        # internal structure targets, this loss may remain useful while the
+        # reconstruction term above usually needs to change.
         terms["kl"] = 0.5 * torch.mean(mean.pow(2) + logvar.exp() - logvar - 1)
         terms["loss"] = terms["loss"] + self.lambda_kl * terms["kl"]
             

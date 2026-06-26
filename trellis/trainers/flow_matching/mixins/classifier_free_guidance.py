@@ -16,6 +16,8 @@ class ClassifierFreeGuidanceMixin:
         assert neg_cond is not None, "neg_cond must be provided for classifier-free guidance" 
 
         if self.p_uncond > 0:
+            # Randomly replace real context with negative context so the model can
+            # learn both conditional and unconditional velocity predictions.
             # randomly drop the class label
             def get_batch_size(cond):
                 if isinstance(cond, torch.Tensor):

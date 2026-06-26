@@ -10,6 +10,13 @@ from ..sparse_elastic_mixin import SparseTransformerElasticMixin
 
 
 class SLatRadianceFieldDecoder(SparseTransformerBase):
+    """Decode SLAT features into a sparse trivec radiance-field representation.
+
+    This decoder predicts per-voxel radiance-field parameters rather than an
+    explicit surface. The returned `Strivec` objects are consumed by radiance-field
+    renderers.
+    """
+
     def __init__(
         self,
         resolution: int,
@@ -57,6 +64,9 @@ class SLatRadianceFieldDecoder(SparseTransformerBase):
         nn.init.constant_(self.out_layer.bias, 0)
 
     def _calc_layout(self) -> None:
+        # Flat decoder channels are unpacked into trivec factors, density, and color
+        # features. Changing rank/dim or adding fields requires updating this layout
+        # and the representation/loss code that consumes it.
         self.layout = {
             'trivec': {'shape': (self.rep_config['rank'], 3, self.rep_config['dim']), 'size': self.rep_config['rank'] * 3 * self.rep_config['dim']},
             'density': {'shape': (self.rep_config['rank'],), 'size': self.rep_config['rank']},
@@ -89,6 +99,8 @@ class SLatRadianceFieldDecoder(SparseTransformerBase):
                 device='cuda',
             )
             representation.density_shift = 0.0
+            # Sparse voxel centers become the anchor positions of the radiance-field
+            # cells. The batch column in coords is skipped.
             representation.position = (x.coords[x.layout[i]][:, 1:].float() + 0.5) / self.resolution
             representation.depth = torch.full((representation.position.shape[0], 1), int(np.log2(self.resolution)), dtype=torch.uint8, device='cuda')
             for k, v in self.layout.items():

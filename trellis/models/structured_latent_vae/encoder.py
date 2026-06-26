@@ -8,6 +8,13 @@ from ..sparse_elastic_mixin import SparseTransformerElasticMixin
 
 
 class SLatEncoder(SparseTransformerBase):
+    """SLAT VAE encoder.
+
+    During VAE training this maps sparse per-voxel training features to a latent
+    posterior. The sparse coordinate support is preserved; mean/logvar are predicted
+    per occupied coordinate.
+    """
+
     def __init__(
         self,
         resolution: int,
@@ -53,6 +60,8 @@ class SLatEncoder(SparseTransformerBase):
         nn.init.constant_(self.out_layer.bias, 0)
 
     def forward(self, x: sp.SparseTensor, sample_posterior=True, return_raw=False):
+        # h.feats after out_layer has [num_points, 2 * latent_channels]. Split the
+        # feature axis into mean/logvar for a diagonal posterior at each coordinate.
         h = super().forward(x)
         h = h.type(x.dtype)
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))

@@ -15,6 +15,10 @@ class SparseSubdivideBlock3d(nn.Module):
     """
     A 3D subdivide block that can subdivide the sparse tensor.
 
+    This increases sparse spatial resolution by splitting each active voxel into
+    child voxels, then applies sparse convolutions on the refined support. It is
+    mesh-decoder-specific upsampling, not part of the SLAT flow sampler.
+
     Args:
         channels: channels in the inputs and outputs.
         out_channels: if specified, the number of output channels.
@@ -70,6 +74,13 @@ class SparseSubdivideBlock3d(nn.Module):
 
 
 class SLatMeshDecoder(SparseTransformerBase):
+    """Decode SLAT features into mesh extraction features.
+
+    The sparse transformer first updates features at SLAT coordinates. Two sparse
+    subdivision stages refine the grid before `SparseFeatures2Mesh` extracts a mesh
+    representation from predicted per-voxel surface features.
+    """
+
     def __init__(
         self,
         resolution: int,
@@ -160,6 +171,9 @@ class SLatMeshDecoder(SparseTransformerBase):
         return ret
 
     def forward(self, x: sp.SparseTensor) -> List[MeshExtractResult]:
+        # x is the denormalized SLAT from the pipeline. Coordinates define the
+        # coarse support; subdivision expands support for higher-resolution surface
+        # extraction before converting network outputs to MeshExtractResult objects.
         h = super().forward(x)
         for block in self.upsample:
             h = block(h)

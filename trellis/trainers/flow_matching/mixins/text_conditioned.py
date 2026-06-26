@@ -45,6 +45,8 @@ class TextConditionedMixin:
             self._init_text_cond_model()
         encoding = self.text_cond_model['tokenizer'](text, max_length=77, padding='max_length', truncation=True, return_tensors='pt')
         tokens = encoding['input_ids'].cuda()
+        # CLIP hidden states [B, 77, C] are passed through as token-level context;
+        # no pooling is done before transformer cross-attention.
         embeddings = self.text_cond_model['model'](input_ids=tokens).last_hidden_state
         
         return embeddings
@@ -54,6 +56,8 @@ class TextConditionedMixin:
         Get the conditioning data.
         """
         cond = self.encode_text(cond)
+        # The empty prompt embedding is the negative condition for CFG training and
+        # inference. It is repeated to match the batch.
         kwargs['neg_cond'] = self.text_cond_model['null_cond'].repeat(cond.shape[0], 1, 1)
         cond = super().get_cond(cond, **kwargs)
         return cond

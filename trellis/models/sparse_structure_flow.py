@@ -53,6 +53,15 @@ class TimestepEmbedder(nn.Module):
 
 
 class SparseStructureFlowModel(nn.Module):
+    """Dense DiT-style rectified-flow model for the structure latent grid.
+
+    Input/output tensors are dense 5D grids [B, C, R, R, R]. The model patchifies
+    the grid into a token sequence, adds 3D positional embeddings, modulates each
+    transformer block with the flow timestep, and cross-attends to text/image
+    conditioning tokens. Architecture changes to structure generation usually start
+    here.
+    """
+
     def __init__(
         self,
         resolution: int,
@@ -174,9 +183,21 @@ class SparseStructureFlowModel(nn.Module):
         nn.init.constant_(self.out_layer.bias, 0)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        """Predict rectified-flow velocity for a dense structure latent.
+
+        Args:
+            x: Noisy latent grid [B, in_channels, R, R, R].
+            t: Flow timestep [B], usually scaled to [0, 1000] by the sampler/trainer.
+            cond: Conditioning token sequence [B or 1, T_cond, cond_channels].
+
+        Returns:
+            Velocity tensor [B, out_channels, R, R, R].
+        """
         assert [*x.shape] == [x.shape[0], self.in_channels, *[self.resolution] * 3], \
                 f"Input shape mismatch, got {x.shape}, expected {[x.shape[0], self.in_channels, *[self.resolution] * 3]}"
 
+        # patchify groups each patch_size^3 voxel block into the channel axis.
+        # After reshape/permute, h is [B, num_patches, in_channels * patch_size^3].
         h = patchify(x, self.patch_size)
         h = h.view(*h.shape[:2], -1).permute(0, 2, 1).contiguous()
 
@@ -188,12 +209,16 @@ class SparseStructureFlowModel(nn.Module):
         t_emb = t_emb.type(self.dtype)
         h = h.type(self.dtype)
         cond = cond.type(self.dtype)
+        # Each block receives timestep modulation via AdaLN and prompt/image
+        # conditioning through cross-attention to `cond`.
         for block in self.blocks:
             h = block(h, t_emb, cond)
         h = h.type(x.dtype)
         h = F.layer_norm(h, h.shape[-1:])
         h = self.out_layer(h)
 
+        # Convert token predictions back to a dense 3D grid matching the input
+        # resolution. This output is the velocity used by flow matching/sampling.
         h = h.permute(0, 2, 1).view(h.shape[0], h.shape[2], *[self.resolution // self.patch_size] * 3)
         h = unpatchify(h, self.patch_size).contiguous()
 

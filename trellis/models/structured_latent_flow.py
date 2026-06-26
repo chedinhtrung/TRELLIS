@@ -13,6 +13,13 @@ from .sparse_elastic_mixin import SparseTransformerElasticMixin
 
 
 class SparseResBlock3d(nn.Module):
+    """Sparse 3D residual block used around the SLAT transformer.
+
+    The block preserves sparse coordinates while updating per-coordinate features.
+    Optional up/downsampling changes coordinate resolution through sparse spatial
+    operators, while timestep embeddings provide scale/shift modulation.
+    """
+
     def __init__(
         self,
         channels: int,
@@ -67,6 +74,14 @@ class SparseResBlock3d(nn.Module):
     
 
 class SLatFlowModel(nn.Module):
+    """Sparse rectified-flow model for SLAT features.
+
+    Input/output are `SparseTensor` objects. Coordinates encode generated occupied
+    voxels as [num_points, 4] = (batch, x, y, z); features are the noisy latent
+    vectors at those coordinates. Unlike the structure flow, this model generally
+    changes only features, while coordinates define the support produced by stage 1.
+    """
+
     def __init__(
         self,
         resolution: int,
@@ -238,6 +253,17 @@ class SLatFlowModel(nn.Module):
         nn.init.constant_(self.out_layer.bias, 0)
 
     def forward(self, x: sp.SparseTensor, t: torch.Tensor, cond: torch.Tensor) -> sp.SparseTensor:
+        """Predict rectified-flow velocity for sparse SLAT features.
+
+        Args:
+            x: Sparse tensor with feats [num_points, in_channels] and coords
+               [num_points, 4]. Points from each batch item must be contiguous.
+            t: Flow timestep [B].
+            cond: Text/image context [B or 1, T_cond, cond_channels].
+
+        Returns:
+            Sparse tensor with the same coordinate support and output-channel feats.
+        """
         h = self.input_layer(x).type(self.dtype)
         t_emb = self.t_embedder(t)
         if self.share_mod:
@@ -246,13 +272,20 @@ class SLatFlowModel(nn.Module):
         cond = cond.type(self.dtype)
 
         skips = []
+        # Optional sparse IO blocks pack local 3D context before global sparse
+        # transformer attention. Skip features are saved by point order and reused
+        # symmetrically by output blocks.
         # pack with input blocks
         for block in self.input_blocks:
             h = block(h, t_emb)
             skips.append(h.feats)
         
         if self.pe_mode == "ape":
+            # Positional embedding uses only spatial coordinates; batch index is not
+            # part of geometry. The sparse tensor still carries batch in coords[:, 0].
             h = h + self.pos_embedder(h.coords[:, 1:]).type(self.dtype)
+        # Cross-attention here is where prompt/image conditioning enters SLAT
+        # generation. Self-attention operates over sparse occupied voxels.
         for block in self.blocks:
             h = block(h, t_emb, cond)
 

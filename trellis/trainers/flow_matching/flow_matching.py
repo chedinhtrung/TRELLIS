@@ -69,6 +69,10 @@ class FlowMatchingTrainer(BasicTrainer):
     def diffuse(self, x_0: torch.Tensor, t: torch.Tensor, noise: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Diffuse the data for a given number of diffusion steps.
+
+        This is rectified-flow interpolation, not a DDPM Markov chain: x_t lies on
+        a straight path between clean data x_0 and Gaussian noise, with sigma_min
+        controlling the small amount of noise left near t=0.
         In other words, sample from q(x_t | x_0).
 
         Args:
@@ -159,6 +163,9 @@ class FlowMatchingTrainer(BasicTrainer):
             a dict with the key "loss" containing a tensor of shape [N].
             may also contain other keys for different terms.
         """
+        # Dense structure-flow training: x_0 is usually a structure latent grid
+        # [B, C, R, R, R]. The denoiser learns the velocity field along the path
+        # from data to noise.
         noise = torch.randn_like(x_0)
         t = self.sample_t(x_0.shape[0]).to(x_0.device).float()
         x_t = self.diffuse(x_0, t, noise=noise)
@@ -166,6 +173,8 @@ class FlowMatchingTrainer(BasicTrainer):
         
         pred = self.training_models['denoiser'](x_t, t * 1000, cond, **kwargs)
         assert pred.shape == noise.shape == x_0.shape
+        # The target is velocity, not x_0 or epsilon. This must stay consistent
+        # with FlowEulerSampler, which integrates predicted velocity.
         target = self.get_v(x_0, noise, t)
         terms = edict()
         terms["mse"] = F.mse_loss(pred, target)

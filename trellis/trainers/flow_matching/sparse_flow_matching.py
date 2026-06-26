@@ -92,6 +92,9 @@ class SparseFlowMatchingTrainer(FlowMatchingTrainer):
             a dict with the key "loss" containing a tensor of shape [N].
             may also contain other keys for different terms.
         """
+        # Sparse SLAT-flow training: only feats are noised and supervised. Coords
+        # remain fixed, so the model learns latent values on an existing sparse
+        # support rather than learning occupancy here.
         noise = x_0.replace(torch.randn_like(x_0.feats))
         t = self.sample_t(x_0.shape[0]).to(x_0.device).float()
         x_t = self.diffuse(x_0, t, noise=noise)
@@ -101,6 +104,8 @@ class SparseFlowMatchingTrainer(FlowMatchingTrainer):
         assert pred.shape == noise.shape == x_0.shape
         target = self.get_v(x_0, noise, t)
         terms = edict()
+        # Loss is computed on the sparse feature matrix. The SparseTensor wrapper
+        # carries coords/layout, but regression happens only on per-point features.
         terms["mse"] = F.mse_loss(pred.feats, target.feats)
         terms["loss"] = terms["mse"]
 

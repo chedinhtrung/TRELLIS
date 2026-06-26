@@ -10,6 +10,13 @@ from ..sparse_elastic_mixin import SparseTransformerElasticMixin
 
 
 class SLatGaussianDecoder(SparseTransformerBase):
+    """Decode SLAT features into 3D Gaussian primitives.
+
+    For each occupied sparse voxel, the decoder predicts a fixed layout of Gaussian
+    parameters: local offset, color/DC feature, scale, rotation, and opacity. The
+    representation code later renders these primitives.
+    """
+
     def __init__(
         self,
         resolution: int,
@@ -65,6 +72,8 @@ class SLatGaussianDecoder(SparseTransformerBase):
         self.register_buffer('offset_perturbation', perturbation)
 
     def _calc_layout(self) -> None:
+        # The output feature vector is a flat concatenation of all Gaussian fields.
+        # `layout` records how to slice h.feats back into structured parameters.
         self.layout = {
             '_xyz' : {'shape': (self.rep_config['num_gaussians'], 3), 'size': self.rep_config['num_gaussians'] * 3},
             '_features_dc' : {'shape': (self.rep_config['num_gaussians'], 1, 3), 'size': self.rep_config['num_gaussians'] * 3},
@@ -98,6 +107,8 @@ class SLatGaussianDecoder(SparseTransformerBase):
                 opacity_bias = self.rep_config['opacity_bias'],
                 scaling_activation = self.rep_config['scaling_activation']
             )
+            # Convert integer voxel coordinates to normalized voxel centers. The
+            # predicted `_xyz` field is a bounded local offset around each center.
             xyz = (x.coords[x.layout[i]][:, 1:].float() + 0.5) / self.resolution
             for k, v in self.layout.items():
                 if k == '_xyz':

@@ -20,6 +20,12 @@ def norm_layer(norm_type: str, *args, **kwargs) -> nn.Module:
 
 
 class ResBlock3d(nn.Module):
+    """Dense 3D residual block for voxel-grid VAEs.
+
+    These blocks operate on tensors shaped [B, C, X, Y, Z]. They are plain
+    convolutional utilities, not sparse operators.
+    """
+
     def __init__(
         self,
         channels: int,
@@ -184,6 +190,13 @@ class SparseStructureEncoder(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
 
     def forward(self, x: torch.Tensor, sample_posterior: bool = False, return_raw: bool = False) -> torch.Tensor:
+        """Encode occupancy grids into structure latents.
+
+        Args:
+            x: Dense occupancy-like tensor [B, in_channels, R, R, R].
+            sample_posterior: If True, sample z from N(mean, exp(logvar)).
+            return_raw: If True, also return posterior mean/logvar for KL loss.
+        """
         h = self.input_layer(x)
         h = h.type(self.dtype)
 
@@ -194,6 +207,8 @@ class SparseStructureEncoder(nn.Module):
         h = h.type(x.dtype)
         h = self.out_layer(h)
 
+        # The output channel dimension is split into posterior parameters. The
+        # latent z has shape [B, latent_channels, R_lat, R_lat, R_lat].
         mean, logvar = h.chunk(2, dim=1)
 
         if sample_posterior:
@@ -293,6 +308,15 @@ class SparseStructureDecoder(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Decode structure latents into occupancy logits.
+
+        Args:
+            x: Structure latent [B, latent_channels, R_lat, R_lat, R_lat].
+
+        Returns:
+            Logits [B, out_channels, R, R, R]. In inference, positive logits are
+            converted to sparse voxel coordinates for the SLAT stage.
+        """
         h = self.input_layer(x)
         
         h = h.type(self.dtype)

@@ -64,6 +64,8 @@ class ImageConditionedMixin:
         if self.image_cond_model is None:
             self._init_image_cond_model()
         image = self.image_cond_model['transform'](image).cuda()
+        # DINOv2 patch/register tokens become the cross-attention context for both
+        # structure and SLAT denoisers. Shape is [B, T_image, C].
         features = self.image_cond_model['model'](image, is_training=True)['x_prenorm']
         patchtokens = F.layer_norm(features, features.shape[-1:])
         return patchtokens
@@ -73,6 +75,8 @@ class ImageConditionedMixin:
         Get the conditioning data.
         """
         cond = self.encode_image(cond)
+        # For image CFG, the negative condition is an all-zero token sequence. The
+        # CFG mixin may replace some samples with this during training.
         kwargs['neg_cond'] = torch.zeros_like(cond)
         cond = super().get_cond(cond, **kwargs)
         return cond

@@ -27,7 +27,10 @@ def block_attn_config(self):
 class SparseTransformerBase(nn.Module):
     """
     Sparse Transformer without output layers.
-    Serve as the base class for encoder and decoder.
+
+    Serve as the base class for the SLAT encoder and all SLAT decoders. The input
+    is a `SparseTensor`; coordinates are kept fixed while feature vectors are
+    projected, position-encoded, and transformed with sparse attention.
     """
     def __init__(
         self,
@@ -108,10 +111,14 @@ class SparseTransformerBase(nn.Module):
         self.apply(_basic_init)
 
     def forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
+        # x.feats is [num_points, in_channels]; x.coords is [num_points, 4].
+        # The sparse transformer updates features and keeps coordinate support.
         h = self.input_layer(x)
         if self.pe_mode == "ape":
             h = h + self.pos_embedder(x.coords[:, 1:])
         h = h.type(self.dtype)
+        # Attention mode is chosen by config: full is easiest to reason about,
+        # while windowed/serialized modes trade global context for memory efficiency.
         for block in self.blocks:
             h = block(h)
         return h

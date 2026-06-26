@@ -140,6 +140,8 @@ class ModulatedSparseTransformerCrossBlock(nn.Module):
             )
 
     def _forward(self, x: SparseTensor, mod: torch.Tensor, context: torch.Tensor) -> SparseTensor:
+        # `mod` is the timestep embedding (or precomputed AdaLN parameters).
+        # `context` is the prompt/image token sequence used by cross-attention.
         if self.share_mod:
             shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = mod.chunk(6, dim=1)
         else:
@@ -150,6 +152,8 @@ class ModulatedSparseTransformerCrossBlock(nn.Module):
         h = h * gate_msa
         x = x + h
         h = x.replace(self.norm2(x.feats))
+        # Conditioning enters here: sparse voxel queries attend to dense text/image
+        # context tokens. Coordinates are unchanged; only h.feats is updated.
         h = self.cross_attn(h, context)
         x = x + h
         h = x.replace(self.norm3(x.feats))

@@ -30,6 +30,9 @@ class FlowEulerSampler(Sampler):
         return (x_t - (1 - t) * x_0) / (self.sigma_min + (1 - self.sigma_min) * t)
 
     def _v_to_xstart_eps(self, x_t, t, v):
+        # Rectified-flow models predict velocity v = d x_t / d t. This helper
+        # converts that velocity into implied clean data x_0 and noise eps for
+        # logging/inspection; sampling itself integrates v directly.
         assert x_t.shape == v.shape
         eps = (1 - t) * v + x_t
         x_0 = (1 - self.sigma_min) * x_t - (self.sigma_min + (1 - self.sigma_min) * t) * v
@@ -105,6 +108,9 @@ class FlowEulerSampler(Sampler):
             - 'pred_x_t': a list of prediction of x_t.
             - 'pred_x_0': a list of prediction of x_0.
         """
+        # Start at pure noise (t=1) and integrate backward to data (t=0).
+        # `sample` can be a dense Tensor or TRELLIS SparseTensor because both
+        # implement shape/device and arithmetic used by sample_once().
         sample = noise
         t_seq = np.linspace(1, 0, steps + 1)
         t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)

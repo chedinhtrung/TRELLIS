@@ -16,6 +16,16 @@ class TrellisImageTo3DPipeline(Pipeline):
     """
     Pipeline for inferring Trellis image-to-3D models.
 
+    This class is the high-level inference graph for image prompts:
+    Image -> DINOv2 tokens -> sparse-structure flow -> structure VAE decoder
+    -> sparse voxel coordinates -> SLAT flow -> output decoders. 
+    
+    The same conditioning tokens are passed to both generative stages.
+
+    Note: The sampler means the object that actually runs the iterative denoising / flow-sampling process.
+    The flow model itself only predicts 1 step direction, but to generate something, the sampler must 
+    repeatedly call the model over many timesteps. 
+
     Args:
         models (dict[str, nn.Module]): The models to use in the pipeline.
         sparse_structure_sampler (samplers.Sampler): The sampler for the sparse structure.
@@ -74,6 +84,10 @@ class TrellisImageTo3DPipeline(Pipeline):
         dinov2_model = torch.hub.load('facebookresearch/dinov2', name, pretrained=True)
         dinov2_model.eval()
         self.models['image_cond_model'] = dinov2_model
+        # For each RGB channel indepdendently, normalized = (pixel - mean) / std
+        # These values are the standard values expected by DINOv2, DINOv2 expects images to be
+        # normalized like its training input (ImageNet)
+        # ResNet, ViT, ... also use these values, this is a common normalization used for many models pretrained on ImageNet
         transform = transforms.Compose([
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
@@ -122,6 +136,7 @@ class TrellisImageTo3DPipeline(Pipeline):
 
         Args:
             image (Union[torch.Tensor, list[Image.Image]]): The image to encode
+            The argument image can be either a torch.Tensor or shape (B, C, H, W) or a list of PIL images
 
         Returns:
             torch.Tensor: The encoded features.
@@ -138,6 +153,9 @@ class TrellisImageTo3DPipeline(Pipeline):
             raise ValueError(f"Unsupported type of image: {type(image)}")
         
         image = self.image_cond_model_transform(image).to(self.device)
+        # DINOv2 returns one token sequence per image. For ViT-L/14 at 518x518 this
+        # is typically [B, 1370, C]: register/class-style tokens plus patch tokens.
+        # TRELLIS keeps the whole normalized sequence as cross-attention context.
         features = self.models['image_cond_model'](image, is_training=True)['x_prenorm']
         patchtokens = F.layer_norm(features, features.shape[-1:])
         return patchtokens
@@ -153,7 +171,13 @@ class TrellisImageTo3DPipeline(Pipeline):
             dict: The conditioning information
         """
         cond = self.encode_image(image)
+
+        # The negative conditioning is a zero tensor of the same shape as the positive conditioning. The idea is: During
+        # sampling, the model predicts twice: Once with the image condition, and once with zero condition, then it combines
+        # them: final_pred = pred_uncond + s * (pred_cond - pred_uncond). The difference between the 2 predictions isolates 
+        # the effect of the image condition, and the s factor controls how much to apply it. 
         neg_cond = torch.zeros_like(cond)
+
         return {
             'cond': cond,
             'neg_cond': neg_cond,
@@ -173,7 +197,9 @@ class TrellisImageTo3DPipeline(Pipeline):
             num_samples (int): The number of samples to generate.
             sampler_params (dict): Additional parameters for the sampler.
         """
-        # Sample occupancy latent
+        # Stage 1: sample a dense latent grid for occupancy/structure. Shape is
+        # [num_samples, C_s, R, R, R], where R is the structure latent resolution.
+        # The flow model predicts velocity while cross-attending to image tokens.
         flow_model = self.models['sparse_structure_flow_model']
         reso = flow_model.resolution
         noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
@@ -186,7 +212,10 @@ class TrellisImageTo3DPipeline(Pipeline):
             verbose=True
         ).samples
         
-        # Decode occupancy latent
+        # The structure VAE decoder maps the dense latent to occupancy logits.
+        # Thresholding at 0 creates sparse voxel coordinates. The decoder output is
+        # [B, 1, X, Y, Z], so argwhere returns (batch, channel, x, y, z); the channel
+        # column is dropped to get SparseTensor coordinates (batch, x, y, z).
         decoder = self.models['sparse_structure_decoder']
         coords = torch.argwhere(decoder(z_s)>0)[:, [0, 2, 3, 4]].int()
 
@@ -230,7 +259,9 @@ class TrellisImageTo3DPipeline(Pipeline):
             coords (torch.Tensor): The coordinates of the sparse structure.
             sampler_params (dict): Additional parameters for the sampler.
         """
-        # Sample structured latent
+        # Stage 2: sample SLAT features only at the coordinates from Stage 1.
+        # The sparse tensor has feats [num_occupied_voxels, C_l] and coords
+        # [num_occupied_voxels, 4] storing (batch, x, y, z).
         flow_model = self.models['slat_flow_model']
         noise = sp.SparseTensor(
             feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
@@ -245,6 +276,8 @@ class TrellisImageTo3DPipeline(Pipeline):
             verbose=True
         ).samples
 
+        # Flow training operates in normalized SLAT space; decoders expect the
+        # original latent distribution, so denormalize before mesh/GS/RF decoding.
         std = torch.tensor(self.slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
@@ -267,7 +300,8 @@ class TrellisImageTo3DPipeline(Pipeline):
 
         Args:
             image (Image.Image): The image prompt.
-            num_samples (int): The number of samples to generate.
+            num_samples (int): The number of samples to generate. The sampler runs num_samples trajectories in parallel, producing
+                num_samples different structured latents, decoded into num_samples different objects. 
             seed (int): The random seed.
             sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
             slat_sampler_params (dict): Additional parameters for the structured latent sampler.
@@ -278,6 +312,9 @@ class TrellisImageTo3DPipeline(Pipeline):
             image = self.preprocess_image(image)
         cond = self.get_cond([image])
         torch.manual_seed(seed)
+        # Inference intentionally exposes the two boundary tensors: generated sparse
+        # coordinates, then generated SLAT features on those coordinates. These are
+        # useful inspection points when modifying the model.
         coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
         slat = self.sample_slat(cond, coords, slat_sampler_params)
         return self.decode_slat(slat, formats)
