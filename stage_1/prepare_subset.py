@@ -18,6 +18,14 @@ from common import (
 
 
 def parse_args() -> argparse.Namespace:
+    """
+    Parse command-line options for building the small Stage 1 subset.
+
+    The defaults point to the local ShapeNet download and to the converted
+    ShapeNetInternals_small dataset folder.  --per-category controls
+    how many objects are selected from each ShapeNet category, and
+    --overwrite allows regenerating an existing metadata file.
+    """
     parser = argparse.ArgumentParser(description="Prepare a small ShapeNet-internals TRELLIS metadata subset.")
     parser.add_argument("--shapenet-root", type=Path, default=DEFAULT_SHAPENET_ROOT)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_DATASET_DIR)
@@ -27,10 +35,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def select_category(shapenet_root: Path, category: str, per_category: int) -> list[dict]:
+    """
+    Select the highest-scoring usable objects from one ShapeNet category.
+    """
     category_root = shapenet_root / category
     score_rows = read_score_rows(shapenet_root, category)
     candidates = []
     for object_dir in sorted(category_root.iterdir()):
+        # Each ShapeNet object is stored as ShapeNet/<category>/<object_id>/.
         if not object_dir.is_dir():
             continue
         object_id = object_dir.name
@@ -41,6 +53,8 @@ def select_category(shapenet_root: Path, category: str, per_category: int) -> li
         if not obj_path.exists() or not surface_path.exists():
             continue
         score = score_rows.get(object_id, {})
+        # Missing score values are treated as zero so unscored objects can
+        # still participate, but scored internal-rich objects sort first.
         complexity = float(score.get("complexity_score", 0.0) or 0.0)
         inner_face_count = float(score.get("inner_face_count", 0.0) or 0.0)
         inner_edge_count = float(score.get("inner_edge_count", 0.0) or 0.0)
@@ -71,11 +85,16 @@ def select_category(shapenet_root: Path, category: str, per_category: int) -> li
             "ss_latent_ss_enc_conv3d_16l8_fp16": False,
             "latent_dinov2_vitl14_reg_slat_enc_swin8_B_64l8_fp16": False,
         })
+    # Sort by internal-geometry evidence first, then by id for deterministic
+    # tie-breaking.  The reverse sort puts the strongest candidates first.
     candidates.sort(key=lambda row: (row["complexity_score"], row["inner_face_count"], row["sha256"]), reverse=True)
     return candidates[:per_category]
 
 
 def main() -> None:
+    """
+    Create metadata, split files, and a selected-id list for Stage 1.
+    """
     args = parse_args()
     metadata_path = args.output_dir / "metadata.csv"
     if metadata_path.exists() and not args.overwrite:
@@ -85,6 +104,8 @@ def main() -> None:
     ensure_dir(args.output_dir)
     rows = []
     for category in CATEGORIES:
+        # Keep category coverage balanced by taking the same number of objects
+        # from each category rather than simply choosing the global top scores.
         selected = select_category(args.shapenet_root, category, args.per_category)
         if len(selected) < args.per_category:
             print(f"Warning: selected only {len(selected)} objects for category {category}")
@@ -96,6 +117,8 @@ def main() -> None:
     ids = [row["sha256"] for row in rows]
     write_splits(args.output_dir, ids)
     split_lookup = {}
+    # Re-read the split files so the split column matches exactly what was
+    # written to disk and what TRELLIS preprocessing will consume.
     for split_name in ("train", "val", "test"):
         split_file = args.output_dir / "splits" / f"{split_name}.txt"
         for sample_id in split_file.read_text(encoding="utf-8").splitlines():

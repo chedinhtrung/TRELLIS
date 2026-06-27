@@ -18,15 +18,25 @@ from common import (
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse the dataset directory whose artifact flags should be refreshed."""
     parser = argparse.ArgumentParser(description="Refresh ShapeNetInternals_small metadata artifact flags.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_DATASET_DIR)
     return parser.parse_args()
 
 
 def main() -> None:
+    """Scan the converted dataset and update artifact availability columns.
+
+    Each preprocessing stage writes files into a known TRELLIS folder layout.
+    This function checks those locations for every sample id, records whether
+    the artifact exists and is non-empty, and writes both the refreshed
+    ``metadata.csv`` and a compact ``statistics_stage1.txt`` summary.
+    """
     args = parse_args()
     metadata = read_metadata(args.output_dir)
 
+    # Older or partially generated metadata files may not have every Stage 1
+    # flag column yet.  Add missing columns before assigning refreshed values.
     for col, default in [
         ("rendered", False),
         ("voxelized", False),
@@ -48,6 +58,8 @@ def main() -> None:
     latents = []
     for _, row in metadata.iterrows():
         sample_id = row["sha256"]
+        # Render completion is represented by transforms.json; it is the file
+        # downstream TRELLIS tools need in order to interpret the view images.
         rendered.append(artifact_exists(args.output_dir / "renders" / sample_id / "transforms.json"))
         cond_rendered.append(artifact_exists(args.output_dir / "renders_cond" / sample_id / "transforms.json"))
         voxel_path = args.output_dir / "voxels" / f"{sample_id}.ply"
@@ -55,6 +67,8 @@ def main() -> None:
         voxelized.append(has_voxels)
         if has_voxels:
             try:
+                # Counting PLY vertices gives the number of occupied target
+                # voxels because Stage 1 writes exactly one point per voxel.
                 num_voxels.append(int(read_ply_points(voxel_path).shape[0]))
             except Exception:
                 num_voxels.append(0)
@@ -73,6 +87,8 @@ def main() -> None:
     metadata[f"latent_{SLAT_LATENT_MODEL}"] = latents
     write_metadata(args.output_dir, metadata)
 
+    # The text summary is deliberately simple so it can be read quickly after a
+    # long pipeline run or included in experiment notes.
     stats = {
         "samples": len(metadata),
         "rendered": int(np.sum(rendered)),

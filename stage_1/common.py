@@ -14,8 +14,8 @@ import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SHAPENET_ROOT = REPO_ROOT / "ShapeNet"
-DEFAULT_DATASET_DIR = REPO_ROOT / "datasets" / "ShapeNetInternals_small"
-DEFAULT_RESULTS_DIR = REPO_ROOT / "results" / "shapenet_internals_stage1_reconstruction"
+DEFAULT_DATASET_DIR = REPO_ROOT / "datasets" / "ShapeNetInternals_small"  # Where the processed ShapeNet dataset is stored
+DEFAULT_RESULTS_DIR = REPO_ROOT / "results" / "shapenet_internals_stage1_reconstruction"  
 FEATURE_MODEL = "dinov2_vitl14_reg"
 SS_LATENT_MODEL = "ss_enc_conv3d_16l8_fp16"
 SLAT_LATENT_MODEL = "dinov2_vitl14_reg_slat_enc_swin8_B_64l8_fp16"
@@ -23,10 +23,21 @@ CATEGORIES = ("bus", "cabinet", "cars", "file_cabinet")
 
 
 def ensure_dir(path: Path) -> None:
+    """
+    Create a directory if it is missing.
+    """
     path.mkdir(parents=True, exist_ok=True)
 
 
 def read_metadata(dataset_dir: Path) -> pd.DataFrame:
+    """
+    Load the TRELLIS-style metadata.csv for a converted dataset.
+
+    dataset_dir is expected to be a preprocessed dataset folder such as
+    datasets/ShapeNetInternals_small. The function fails early with a
+    clear error if the metadata file has not been created yet, because almost
+    every later preprocessing/evaluation step depends on this manifest.
+    """
     path = dataset_dir / "metadata.csv"
     if not path.exists():
         raise FileNotFoundError(f"metadata.csv not found: {path}")
@@ -34,21 +45,39 @@ def read_metadata(dataset_dir: Path) -> pd.DataFrame:
 
 
 def write_metadata(dataset_dir: Path, metadata: pd.DataFrame) -> None:
+    """
+    Write the dataset manifest back to metadata.csv.
+
+    Stage 1 scripts repeatedly update artifact flags such as voxelized or
+    rendered.  This helper keeps those updates consistent and guarantees
+    that the dataset folder exists before pandas writes the CSV file.
+    """
     ensure_dir(dataset_dir)
     metadata.to_csv(dataset_dir / "metadata.csv", index=False)
 
 
 def stable_id(category: str, object_id: str) -> str:
+    """
+    Build the stable (unique) sample id used throughout the converted dataset by 
+    combining the category and object id (ShapeNet object ids are only unique inside 
+    a category). 
+    """
     return f"{category}__{object_id}"
 
 
 def parse_stable_id(sample_id: str) -> tuple[str, str]:
+    """
+    Split a Stage 1 sample id back into (category, object_id).
+    """
     if "__" not in sample_id:
         raise ValueError(f"Expected '<category>__<object_id>', got {sample_id}")
     return sample_id.split("__", 1)
 
 
 def read_score_rows(shapenet_root: Path, category: str) -> dict[str, dict[str, str]]:
+    """
+    Read the per-category internal-geometry score CSV, if it exists.
+    """
     path = shapenet_root / f"{category}_center_box_scores.csv"
     if not path.exists():
         return {}
@@ -57,6 +86,14 @@ def read_score_rows(shapenet_root: Path, category: str) -> dict[str, dict[str, s
 
 
 def split_ids(ids: list[str]) -> dict[str, list[str]]:
+    """
+    Create a small deterministic train/val/test split.
+
+    The Stage 1 feasibility subset is tiny, so this uses simple slicing rather
+    than randomness: roughly 70/15/15 when there are enough samples, and all
+    available samples in train for very small inputs. Keeping the split
+    deterministic makes reruns easier to compare.
+    """
     ids = list(ids)
     n = len(ids)
     if n == 0:
@@ -72,6 +109,9 @@ def split_ids(ids: list[str]) -> dict[str, list[str]]:
 
 
 def write_splits(dataset_dir: Path, ids: list[str]) -> None:
+    """
+    Write splits/train.txt, val.txt, and test.txt.
+    """
     split_dir = dataset_dir / "splits"
     ensure_dir(split_dir)
     splits = split_ids(ids)
@@ -83,6 +123,9 @@ def write_splits(dataset_dir: Path, ids: list[str]) -> None:
 
 
 def assign_split(sample_id: str, dataset_dir: Path) -> str:
+    """
+    Look up which split contains a sample id.
+    """
     for split in ("train", "val", "test"):
         path = dataset_dir / "splits" / f"{split}.txt"
         if path.exists() and sample_id in set(path.read_text(encoding="utf-8").splitlines()):
@@ -91,6 +134,9 @@ def assign_split(sample_id: str, dataset_dir: Path) -> str:
 
 
 def read_binvox(path: Path) -> tuple[np.ndarray, dict[str, object]]:
+    """
+    Take a .binvox file and return a normal 3D boolean occupancy grid along with its metadata. 
+    """
     with path.open("rb") as fp:
         header = fp.readline().decode("ascii", errors="replace").strip()
         if not header.startswith("#binvox"):
@@ -118,6 +164,9 @@ def read_binvox(path: Path) -> tuple[np.ndarray, dict[str, object]]:
 
 
 def or_downsample(grid: np.ndarray, resolution: int) -> np.ndarray:
+    """
+    Downsample a cubic occupancy grid using OR/max pooling.
+    """
     if grid.ndim != 3 or len(set(grid.shape)) != 1:
         raise ValueError(f"Expected cubic 3D grid, got {grid.shape}")
     source_resolution = grid.shape[0]
@@ -135,6 +184,10 @@ def or_downsample(grid: np.ndarray, resolution: int) -> np.ndarray:
 
 
 def grid_to_positions(grid: np.ndarray) -> np.ndarray:
+    """
+    Convert occupied voxel indices to a sparse 3D point cloud. TRELLIS stores sparse voxels as 
+    points (.ply), not as a dense 64 x 64 x 64 boolean grid. 
+    """
     coords = np.argwhere(grid)
     if coords.size == 0:
         return np.zeros((0, 3), dtype=np.float32)
@@ -143,6 +196,9 @@ def grid_to_positions(grid: np.ndarray) -> np.ndarray:
 
 
 def positions_to_grid(positions: np.ndarray, resolution: int = 64) -> np.ndarray:
+    """
+    Convert normalized voxel-center positions back to a boolean grid.
+    """
     grid = np.zeros((resolution, resolution, resolution), dtype=bool)
     if positions.size == 0:
         return grid
@@ -153,6 +209,9 @@ def positions_to_grid(positions: np.ndarray, resolution: int = 64) -> np.ndarray
 
 
 def write_ply_points(path: Path, positions: np.ndarray) -> None:
+    """
+    Take a list of 3D points and save them as a .ply file. 
+    """
     ensure_dir(path.parent)
     positions = np.asarray(positions, dtype=np.float32).reshape(-1, 3)
     with path.open("w", encoding="ascii") as fp:
@@ -168,6 +227,9 @@ def write_ply_points(path: Path, positions: np.ndarray) -> None:
 
 
 def read_ply_points(path: Path) -> np.ndarray:
+    """
+    Read a .ply file and return a list of 3D points. 
+    """
     with path.open("r", encoding="ascii", errors="replace") as fp:
         vertex_count = None
         for line in fp:
@@ -188,6 +250,9 @@ def read_ply_points(path: Path) -> np.ndarray:
 
 
 def artifact_exists(path: Path) -> bool:
+    """
+    Return whether an expected artifact file exists and is non-empty.
+    """
     return path.exists() and path.stat().st_size > 0
 
 
@@ -199,6 +264,18 @@ def run_command(
     log_path: Path | None = None,
     keep_going: bool = False,
 ) -> int:
+    """
+    Run another Python/script/terminal command, show its output live, optionally 
+    save that output to a log file, and stop if the command fails.
+
+    Example usage: 
+    run_command([
+        "python",
+        "dataset_toolkits/render.py",
+        "--dataset_dir",
+        "datasets/ShapeNetInternals_small"
+    ])
+    """
     display = " ".join(cmd)
     print(f"\n[stage_1] {display}", flush=True)
     proc_env = os.environ.copy()
@@ -234,13 +311,22 @@ def run_command(
 
 
 def python_cmd(script: Path, *args: str) -> list[str]:
+    """
+    Build a command list that runs a Python script with this interpreter.
+    """
     return [sys.executable, str(script), *args]
 
 
 def write_json(path: Path, data: object) -> None:
+    """
+    Write Python data into a JSON file. 
+    """
     ensure_dir(path.parent)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def list_existing(ids: Iterable[str], root: Path, suffix: str) -> list[str]:
+    """
+    Out of these sample IDs, return the ones that already have the expected output file (suffix). 
+    """
     return [sample_id for sample_id in ids if artifact_exists(root / f"{sample_id}{suffix}")]

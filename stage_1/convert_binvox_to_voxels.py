@@ -17,6 +17,12 @@ from common import (
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse options for converting ShapeNet binvox grids to sparse PLY files.
+
+    ``--kind surface`` is the main Stage 1 target because it preserves visible
+    and internal surfaces.  ``--kind solid`` can be used as an ablation that
+    writes to a separate output folder by default.
+    """
     parser = argparse.ArgumentParser(description="Convert ShapeNet binvox grids into TRELLIS 64^3 sparse voxel PLY files.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_DATASET_DIR)
     parser.add_argument("--kind", choices=("surface", "solid"), default="surface")
@@ -27,6 +33,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Convert each metadata row's binvox file into a TRELLIS voxel PLY.
+
+    The script reads ``metadata.csv``, picks either the ``surface_binvox`` or
+    ``solid_binvox`` column, decodes the dense occupancy grid, OR-downsamples it
+    to the requested resolution, and writes one PLY vertex per occupied voxel.
+    For the main surface conversion it also updates ``voxelized`` and
+    ``num_voxels`` in metadata.
+    """
     args = parse_args()
     metadata = read_metadata(args.output_dir)
     out_folder = args.out_folder
@@ -41,6 +55,8 @@ def main() -> None:
         source_col = f"{args.kind}_binvox"
         source = Path(str(row.get(source_col, "")))
         target = out_dir / f"{sample_id}.ply"
+        # Existing outputs are accepted unless the caller explicitly asks to
+        # overwrite, which makes interrupted pipeline runs cheap to resume.
         if target.exists() and not args.overwrite:
             records.append((sample_id, True, "exists", None))
             continue
@@ -49,6 +65,9 @@ def main() -> None:
             continue
         try:
             grid, _ = read_binvox(source)
+            # OR downsampling is intentional: a single occupied source voxel is
+            # enough to keep the target voxel occupied, which protects thin
+            # shelves, seats, walls, and other internal surface details.
             downsampled = or_downsample(grid, args.resolution)
             positions = grid_to_positions(downsampled)
             write_ply_points(target, positions)
@@ -58,6 +77,8 @@ def main() -> None:
 
     ok_ids = {sample_id for sample_id, ok, _, _ in records if ok}
     if args.kind == "surface" and out_folder == "voxels":
+        # TRELLIS' sparse-structure target uses the surface conversion, so only
+        # that canonical output updates the main metadata readiness flags.
         metadata["voxelized"] = metadata["sha256"].isin(ok_ids)
         counts = {}
         for sample_id, ok, _, num_voxels in records:
