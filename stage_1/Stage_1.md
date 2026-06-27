@@ -242,7 +242,13 @@ SLatMeshDecoder
 SparseFeatures2Mesh + FlexiCubes
         |
         v
-MeshExtractResult
+raw mesh in TRELLIS/binvox grid frame
+        |
+        v
+ShapeNet OBJ-frame transform using surface.binvox metadata
+        |
+        v
+MeshExtractResult in ShapeNet OBJ frame
 ```
 
 It uses the pretrained mesh decoder checkpoint:
@@ -349,7 +355,13 @@ SLatMeshDecoder
 SparseFeatures2Mesh + FlexiCubes
         |
         v
-reconstructed mesh
+raw reconstructed mesh in TRELLIS/binvox grid frame
+        |
+        v
+transform with surface.binvox axis, translate, and scale metadata
+        |
+        v
+reconstructed mesh in ShapeNet OBJ frame
         |
         v
 surface sampling and Chamfer/F-score evaluation against source OBJ
@@ -364,35 +376,36 @@ Output:
 Artifacts:
 
 - `metrics.csv`: mesh surface metrics for 12 samples
-- `recon_meshes/*.ply`: 12 reconstructed triangle mesh PLY files
+- `recon_meshes_grid/*.ply`: 12 raw decoder meshes in TRELLIS/binvox grid frame
+- `recon_meshes_obj_frame/*.ply`: 12 transformed meshes in ShapeNet OBJ frame
 
 Metrics were computed with 50,000 sampled surface points per mesh and an F-score threshold of `0.01`.
 
 Results:
 
-- Mean Chamfer-L1: `0.5848`
-- Mean Chamfer-L2: `0.2256`
-- Mean precision @ `0.01`: `0.0116`
-- Mean recall @ `0.01`: `0.0172`
-- Mean F-score @ `0.01`: `0.0137`
+- Mean Chamfer-L1: `0.0189`
+- Mean Chamfer-L2: `0.0006`
+- Mean precision @ `0.01`: `0.8601`
+- Mean recall @ `0.01`: `0.7545`
+- Mean F-score @ `0.01`: `0.7989`
 - Mean GT vertices: `399676.3`
 - Mean GT faces: `376270.2`
-- Mean reconstructed vertices: `248580.3`
-- Mean reconstructed faces: `496877.8`
+- Mean reconstructed vertices: `248580.8`
+- Mean reconstructed faces: `496879.3`
 
 Category means:
 
 ```text
 category       Chamfer-L1  Chamfer-L2  precision  recall    F-score
-bus            0.801568    0.356949    0.000000   0.000000  0.000000
-cabinet        0.451600    0.133421    0.017333   0.020313  0.018687
-cars           0.628390    0.258603    0.017227   0.029327  0.021695
-file_cabinet   0.457712    0.153541    0.011647   0.018980  0.014414
+bus            0.018156    0.000354    0.790847   0.705147  0.745193
+cabinet        0.031864    0.001668    0.832900   0.554240  0.664964
+cars           0.015774    0.000305    0.866313   0.796987  0.829691
+file_cabinet   0.009683    0.000082    0.950207   0.961767  0.955833
 ```
 
 Conclusion:
 
-The true mesh reconstruction path now runs, but the pretrained mesh decoder does not reconstruct the ShapeNet source meshes with useful fidelity in this setup. F-scores are near zero at the `0.01` threshold, and bus reconstructions have zero precision and recall under that criterion. This points to the SLAT-to-mesh path, mesh/data alignment, or ShapeNet domain mismatch as the next bottleneck to investigate, even though the sparse-structure VAE round trip itself is almost lossless.
+After restoring the binvox-grid to ShapeNet-OBJ coordinate transform, the pretrained SLAT mesh decoder reconstructs the source meshes much more faithfully than the earlier raw-coordinate evaluation suggested. The mean F-score is `0.7989`, with strongest performance on `file_cabinet` (`0.9558`) and weakest performance on `cabinet` (`0.6650`). The earlier near-zero mesh metrics were therefore mainly a coordinate-frame evaluation bug, not evidence that the decoder completely failed.
 
 ## 6. Key Findings and Next Steps
 
@@ -408,14 +421,13 @@ preserved internals almost perfectly. The updated mesh reconstruction experiment
 cached SLAT latent -> pretrained mesh decoder -> reconstructed mesh
 ```
 
-That path currently performs poorly on these 12 ShapeNet objects, so the remaining risk has moved from sparse-structure preservation to the SLAT-to-mesh decoder path, mesh/data alignment, or ShapeNet domain mismatch.
+After converting decoded meshes from TRELLIS/binvox grid coordinates back into ShapeNet OBJ coordinates, the mesh path also gives useful reconstructions. The remaining risk is no longer basic coordinate alignment; it is whether generated latents from fine-tuned flow models will preserve the same internal structures when they are not copied from the cached encoders.
 
 The recommended next training direction is:
 
 1. Keep the pretrained encoders/decoders frozen initially.
-2. Audit coordinate normalization, scale, orientation, and mesh metric alignment for the SLAT-to-mesh evaluator.
-3. If the mesh evaluation is aligned correctly, treat the pretrained mesh decoder as a bottleneck for this ShapeNet-internals setup.
-4. Add LoRA adapters to `SparseStructureFlowModel`.
-5. Fine-tune structure generation first.
-6. Validate generated sparse structures and internal voxel cross-sections.
-7. Add LoRA adapters to `ElasticSLatFlowModel` only after structure generation is working and the mesh decoder path is understood.
+2. Add LoRA adapters to `SparseStructureFlowModel`.
+3. Fine-tune structure generation first.
+4. Validate generated sparse structures and internal voxel cross-sections.
+5. Add LoRA adapters to `ElasticSLatFlowModel` after structure generation is working.
+6. Validate generated SLAT latents through the OBJ-frame mesh reconstruction evaluator.
