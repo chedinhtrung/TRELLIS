@@ -398,3 +398,7 @@ FodyWeavers.xsd
 *.sln.iml
 
 __pycache__/
+
+datasets/
+results/
+ShapeNet
