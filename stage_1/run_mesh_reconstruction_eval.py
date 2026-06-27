@@ -27,6 +27,7 @@ import trellis.modules.sparse as sp
 
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "results" / "shapenet_mesh_reconstruction"
 DEFAULT_MESH_DECODER = "microsoft/TRELLIS-image-large/ckpts/slat_dec_mesh_swin8_B_64l8m256c_fp16"
+BINVOX_GRID_TO_OBJ_AXIS = (0, 2, 1)
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +54,44 @@ def load_slat(sample_id: str, dataset_dir: Path, latent_model: str, device: torc
     ], dim=1).to(device)
     feats = torch.from_numpy(data["feats"]).float().to(device)
     return sp.SparseTensor(coords=coords, feats=feats)
+
+
+def read_binvox_header(path: Path) -> dict[str, object]:
+    """Read only the binvox metadata needed to map grid coordinates to OBJ coordinates."""
+    with path.open("rb") as fp:
+        header = fp.readline().decode("ascii", errors="replace").strip()
+        dim_line = fp.readline().decode("ascii", errors="replace").strip().split()
+        translate_line = fp.readline().decode("ascii", errors="replace").strip().split()
+        scale_line = fp.readline().decode("ascii", errors="replace").strip().split()
+        data_line = fp.readline().decode("ascii", errors="replace").strip()
+    if not header.startswith("#binvox"):
+        raise ValueError(f"Not a binvox file: {path}")
+    if dim_line[0] != "dim" or translate_line[0] != "translate" or scale_line[0] != "scale" or data_line != "data":
+        raise ValueError(f"Unexpected binvox header in {path}")
+    return {
+        "dims": tuple(int(v) for v in dim_line[1:4]),
+        "translate": np.asarray([float(v) for v in translate_line[1:4]], dtype=np.float32),
+        "scale": float(scale_line[1]),
+    }
+
+
+def grid_to_obj(points_grid: np.ndarray, header: dict[str, object]) -> np.ndarray:
+    """Convert TRELLIS/binvox grid-frame points into the original ShapeNet OBJ frame."""
+    points_grid = np.asarray(points_grid, dtype=np.float32).reshape(-1, 3)
+    translate = np.asarray(header["translate"], dtype=np.float32)
+    scale = float(header["scale"])
+    points_binvox = points_grid[:, BINVOX_GRID_TO_OBJ_AXIS] + 0.5
+    return (points_binvox * scale + translate).astype(np.float32)
+
+
+def obj_to_grid(points_obj: np.ndarray, header: dict[str, object]) -> np.ndarray:
+    """Convert ShapeNet OBJ-frame points into TRELLIS/binvox grid frame."""
+    points_obj = np.asarray(points_obj, dtype=np.float32).reshape(-1, 3)
+    translate = np.asarray(header["translate"], dtype=np.float32)
+    scale = float(header["scale"])
+    points_binvox = (points_obj - translate) / scale
+    inverse_axis = np.argsort(BINVOX_GRID_TO_OBJ_AXIS)
+    return (points_binvox[:, inverse_axis] - 0.5).astype(np.float32)
 
 
 def load_mesh(path: Path) -> trimesh.Trimesh:
@@ -123,30 +162,51 @@ def mesh_metrics(gt_points: np.ndarray, pred_points: np.ndarray, threshold: floa
     }
 
 
+def metadata_path(row: pd.Series, column: str) -> Path | None:
+    """Return a non-empty metadata path, or None for missing/NaN cells."""
+    value = row.get(column, "")
+    if pd.isna(value):
+        return None
+    value = str(value).strip()
+    return Path(value) if value else None
+
+
 def main() -> None:
     """Decode cached SLAT latents into meshes and write mesh metrics."""
     args = parse_args()
     ensure_dir(args.output_dir)
-    ensure_dir(args.output_dir / "recon_meshes")
+    grid_mesh_dir = args.output_dir / "recon_meshes_grid"
+    obj_frame_mesh_dir = args.output_dir / "recon_meshes_obj_frame"
+    ensure_dir(grid_mesh_dir)
+    ensure_dir(obj_frame_mesh_dir)
 
     metadata = read_metadata(args.dataset_dir)
     if "voxelized" in metadata.columns:
         metadata = metadata[metadata["voxelized"] == True].copy()
-    if "source_obj" not in metadata.columns:
-        raise RuntimeError("metadata.csv must contain a source_obj column.")
+    required_columns = {"source_obj", "surface_binvox"}
+    missing_columns = sorted(required_columns - set(metadata.columns))
+    if missing_columns:
+        raise RuntimeError(f"metadata.csv is missing required columns: {', '.join(missing_columns)}")
 
     selected = []
     latent_dir = args.dataset_dir / "latents" / args.slat_latent_model
     for _, row in metadata.iterrows():
         sample_id = row["sha256"]
-        source_obj = Path(str(row.get("source_obj", "")))
+        source_obj = metadata_path(row, "source_obj")
+        surface_binvox = metadata_path(row, "surface_binvox")
         latent_path = latent_dir / f"{sample_id}.npz"
-        if source_obj.exists() and artifact_exists(latent_path):
+        if (
+            source_obj is not None
+            and surface_binvox is not None
+            and artifact_exists(source_obj)
+            and artifact_exists(surface_binvox)
+            and artifact_exists(latent_path)
+        ):
             selected.append(row)
     if args.limit:
         selected = selected[:args.limit]
     if not selected:
-        raise RuntimeError("No samples with source_obj and cached SLAT latents were found.")
+        raise RuntimeError("No samples with source_obj, surface_binvox, and cached SLAT latents were found.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda":
@@ -157,25 +217,34 @@ def main() -> None:
     rows = []
     for index, row in enumerate(selected):
         sample_id = row["sha256"]
-        source_obj = Path(str(row["source_obj"]))
-        mesh_path = args.output_dir / "recon_meshes" / f"{sample_id}.ply"
+        source_obj = metadata_path(row, "source_obj")
+        surface_binvox = metadata_path(row, "surface_binvox")
+        if source_obj is None or surface_binvox is None:
+            raise RuntimeError(f"Selected sample has missing paths: {sample_id}")
+        grid_mesh_path = grid_mesh_dir / f"{sample_id}.ply"
+        obj_frame_mesh_path = obj_frame_mesh_dir / f"{sample_id}.ply"
+        binvox_header = read_binvox_header(surface_binvox)
 
         print(f"[{index + 1}/{len(selected)}] Decoding {sample_id}", flush=True)
-        if mesh_path.exists() and not args.overwrite_meshes:
-            pred_mesh = load_mesh(mesh_path)
+        if grid_mesh_path.exists() and obj_frame_mesh_path.exists() and not args.overwrite_meshes:
+            pred_mesh = load_mesh(obj_frame_mesh_path)
         else:
             # The cached SLAT stores sparse coordinates and features. The mesh
-            # decoder turns that sparse latent directly into vertices and faces.
+            # decoder returns raw vertices in TRELLIS/binvox grid frame, so they
+            # must be transformed to ShapeNet OBJ frame before computing metrics.
             slat = load_slat(sample_id, args.dataset_dir, args.slat_latent_model, device)
             with torch.no_grad():
                 decoded = decoder(slat)[0]
             if not decoded.success:
                 raise RuntimeError(f"Mesh decoder produced an empty mesh for {sample_id}")
 
-            vertices = decoded.vertices.detach().cpu().numpy().astype(np.float32)
+            vertices_grid = decoded.vertices.detach().cpu().numpy().astype(np.float32)
             faces = decoded.faces.detach().cpu().numpy().astype(np.int64)
-            export_mesh(mesh_path, vertices, faces)
-            pred_mesh = make_mesh(vertices, faces)
+            vertices_obj = grid_to_obj(vertices_grid, binvox_header)
+
+            export_mesh(grid_mesh_path, vertices_grid, faces)
+            export_mesh(obj_frame_mesh_path, vertices_obj, faces)
+            pred_mesh = make_mesh(vertices_obj, faces)
             torch.cuda.empty_cache()
 
         gt_mesh = load_mesh(source_obj)

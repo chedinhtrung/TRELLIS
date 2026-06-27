@@ -225,21 +225,15 @@ thresholded reconstructed voxels
 Output:
 
 ```text
-/workspace/TRELLIS/results/shapenet_internals_stage1_reconstruction/
+/workspace/TRELLIS/results/shapenet_sparse_reconstruction/
 ```
 
 ### `stage_1/run_mesh_reconstruction_eval.py`
 
-This script is intended to evaluate the full SLAT-to-mesh reconstruction path. We check: If TRELLIS is given the correct latent for this exact object, can its pretrained decoder reconstruct the object well?
+This script evaluates the full SLAT-to-mesh reconstruction path. It loads cached SLAT latents from the converted dataset and checks: If TRELLIS is given the correct latent for this exact object, can its pretrained decoder reconstruct the object well?
 
 ```text
-ShapeNet renders/features
-        |
-        v
-ElasticSLatEncoder
-        |
-        v
-SLAT latent
+cached SLAT latent
         |
         v
 SLatMeshDecoder
@@ -260,10 +254,8 @@ microsoft/TRELLIS-image-large/ckpts/slat_dec_mesh_swin8_B_64l8m256c_fp16
 Output:
 
 ```text
-/workspace/TRELLIS/results/shapenet_internals_stage1_mesh_reconstruction/
+/workspace/TRELLIS/results/shapenet_mesh_reconstruction/
 ```
-
-Current implementation note: the checked-in `run_mesh_reconstruction_eval.py` currently performs the same sparse-structure voxel reconstruction evaluation as `run_reconstruction_eval.py`. It writes `metrics.csv` and `recon_voxels/*.ply`, not decoded mesh files.
 
 ## 5. Reconstruction Experiments
 
@@ -341,58 +333,66 @@ Conclusion:
 
 The sparse-structure VAE is not the bottleneck. It preserved the 64^3 ShapeNet surface voxel targets almost perfectly. Cross-section visualizations showed internal-looking shelf and partition structures surviving the sparse-structure round trip.
 
-### Experiment 2: Mesh Reconstruction Script Run
+### Experiment 2: SLAT-to-Mesh Reconstruction
 
-The second command was run through `stage_1/run_mesh_reconstruction_eval.py` with output under:
+The second experiment tested the full pretrained mesh decoding path from cached SLAT latents to triangle meshes. This answers a different question from Experiment 1: if TRELLIS is given the cached latent for the exact ShapeNet object, can the pretrained mesh decoder reconstruct a mesh close to the original source OBJ?
+
+Pipeline:
 
 ```text
-/workspace/TRELLIS/results/shapenet_internals_stage1_mesh_reconstruction/
+cached SLAT latent
+        |
+        v
+SLatMeshDecoder
+        |
+        v
+SparseFeatures2Mesh + FlexiCubes
+        |
+        v
+reconstructed mesh
+        |
+        v
+surface sampling and Chamfer/F-score evaluation against source OBJ
 ```
 
-However, the current script contents are still the sparse-structure voxel reconstruction evaluator. The produced metrics file is byte-identical to:
+Output:
 
 ```text
-/workspace/TRELLIS/results/shapenet_internals_stage1_reconstruction/metrics.csv
-```
-
-Current pipeline:
-
-```text
-model_normalized.surface.binvox
-        |
-        v
-64^3 sparse voxel PLY
-        |
-        v
-SparseStructureEncoder
-        |
-        v
-sparse-structure latent
-        |
-        v
-SparseStructureDecoder
-        |
-        v
-reconstructed voxel grid
+/workspace/TRELLIS/results/shapenet_mesh_reconstruction/
 ```
 
 Artifacts:
 
-- `metrics.csv`: voxel overlap metrics for 12 samples
-- `recon_voxels/*.ply`: 12 reconstructed sparse voxel PLY files
+- `metrics.csv`: mesh surface metrics for 12 samples
+- `recon_meshes/*.ply`: 12 reconstructed triangle mesh PLY files
 
-Results on the same 12-object subset are identical to Experiment 1:
+Metrics were computed with 50,000 sampled surface points per mesh and an F-score threshold of `0.01`.
 
-- Mean voxel IoU: `0.9996`
-- Mean precision: `0.9997`
-- Mean recall: `0.9999`
-- Mean F1: `0.9998`
-- Mean GT voxels: `11638.2`
-- Mean reconstructed voxels: `11639.6`
+Results:
+
+- Mean Chamfer-L1: `0.5848`
+- Mean Chamfer-L2: `0.2256`
+- Mean precision @ `0.01`: `0.0116`
+- Mean recall @ `0.01`: `0.0172`
+- Mean F-score @ `0.01`: `0.0137`
+- Mean GT vertices: `399676.3`
+- Mean GT faces: `376270.2`
+- Mean reconstructed vertices: `248580.3`
+- Mean reconstructed faces: `496877.8`
+
+Category means:
+
+```text
+category       Chamfer-L1  Chamfer-L2  precision  recall    F-score
+bus            0.801568    0.356949    0.000000   0.000000  0.000000
+cabinet        0.451600    0.133421    0.017333   0.020313  0.018687
+cars           0.628390    0.258603    0.017227   0.029327  0.021695
+file_cabinet   0.457712    0.153541    0.011647   0.018980  0.014414
+```
 
 Conclusion:
 
-These results confirm the sparse-structure round trip again, but they should not be interpreted as evidence about the SLAT mesh decoder. A true full mesh reconstruction experiment still needs `run_mesh_reconstruction_eval.py` to load SLAT latents, call the mesh decoder, write mesh artifacts, and compute mesh/surface metrics.
+The true mesh reconstruction path now runs, but the pretrained mesh decoder does not reconstruct the ShapeNet source meshes with useful fidelity in this setup. F-scores are near zero at the `0.01` threshold, and bus reconstructions have zero precision and recall under that criterion. This points to the SLAT-to-mesh path, mesh/data alignment, or ShapeNet domain mismatch as the next bottleneck to investigate, even though the sparse-structure VAE round trip itself is almost lossless.
 
 ## 6. Key Findings and Next Steps
 
@@ -402,19 +402,20 @@ The original concern was that TRELLIS' pretrained representation might erase int
 surface voxels -> sparse-structure latent -> reconstructed voxels
 ```
 
-preserved internals almost perfectly. The current results do not yet test:
+preserved internals almost perfectly. The updated mesh reconstruction experiment also tests:
 
 ```text
-ShapeNet renders/features -> SLAT latent -> pretrained mesh decoder -> reconstructed mesh
+cached SLAT latent -> pretrained mesh decoder -> reconstructed mesh
 ```
 
-because the mesh reconstruction script currently runs the same sparse-structure voxel evaluator.
+That path currently performs poorly on these 12 ShapeNet objects, so the remaining risk has moved from sparse-structure preservation to the SLAT-to-mesh decoder path, mesh/data alignment, or ShapeNet domain mismatch.
 
 The recommended next training direction is:
 
 1. Keep the pretrained encoders/decoders frozen initially.
-2. Implement and run the true SLAT-to-mesh reconstruction evaluator.
-3. Add LoRA adapters to `SparseStructureFlowModel`.
-4. Fine-tune structure generation first.
-5. Validate generated sparse structures and internal voxel cross-sections.
-6. Add LoRA adapters to `ElasticSLatFlowModel` only after structure generation is working and the mesh decoder check is complete.
+2. Audit coordinate normalization, scale, orientation, and mesh metric alignment for the SLAT-to-mesh evaluator.
+3. If the mesh evaluation is aligned correctly, treat the pretrained mesh decoder as a bottleneck for this ShapeNet-internals setup.
+4. Add LoRA adapters to `SparseStructureFlowModel`.
+5. Fine-tune structure generation first.
+6. Validate generated sparse structures and internal voxel cross-sections.
+7. Add LoRA adapters to `ElasticSLatFlowModel` only after structure generation is working and the mesh decoder path is understood.
