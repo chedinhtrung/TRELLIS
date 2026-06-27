@@ -230,7 +230,7 @@ Output:
 
 ### `stage_1/run_mesh_reconstruction_eval.py`
 
-This script evaluates the full SLAT-to-mesh reconstruction path. We check: If TRELLIS is given the correct latent for this exact object, can its pretrained decoder reconstruct the object well?
+This script is intended to evaluate the full SLAT-to-mesh reconstruction path. We check: If TRELLIS is given the correct latent for this exact object, can its pretrained decoder reconstruct the object well?
 
 ```text
 ShapeNet renders/features
@@ -260,8 +260,10 @@ microsoft/TRELLIS-image-large/ckpts/slat_dec_mesh_swin8_B_64l8m256c_fp16
 Output:
 
 ```text
-/workspace/TRELLIS/results/shapenet_mesh_reconstruction/
+/workspace/TRELLIS/results/shapenet_internals_stage1_mesh_reconstruction/
 ```
+
+Current implementation note: the checked-in `run_mesh_reconstruction_eval.py` currently performs the same sparse-structure voxel reconstruction evaluation as `run_reconstruction_eval.py`. It writes `metrics.csv` and `recon_voxels/*.ply`, not decoded mesh files.
 
 ## 5. Reconstruction Experiments
 
@@ -321,86 +323,98 @@ Results:
 - Mean F1: `0.9998`
 - Mean GT voxels: `11638.2`
 - Mean reconstructed voxels: `11639.6`
+- Mean true positives: `11637.0`
+- Mean false positives: `2.6`
+- Mean false negatives: `1.2`
+
+Category means:
+
+```text
+category       IoU       precision  recall    F1
+bus            0.999947  0.999947   1.000000  0.999974
+cabinet        1.000000  1.000000   1.000000  1.000000
+cars           0.998805  0.999153   0.999652  0.999402
+file_cabinet   0.999781  0.999869   0.999912  0.999891
+```
 
 Conclusion:
 
 The sparse-structure VAE is not the bottleneck. It preserved the 64^3 ShapeNet surface voxel targets almost perfectly. Cross-section visualizations showed internal-looking shelf and partition structures surviving the sparse-structure round trip.
 
-### Experiment 2: Full Mesh Reconstruction
+### Experiment 2: Mesh Reconstruction Script Run
 
-The second experiment tested the complete SLAT latent and mesh decoder path.
-
-Pipeline:
+The second command was run through `stage_1/run_mesh_reconstruction_eval.py` with output under:
 
 ```text
-ShapeNet object
-        |
-        v
-TRELLIS renders + DINO features
-        |
-        v
-ElasticSLatEncoder
-        |
-        v
-SLAT latent
-        |
-        v
-SLatMeshDecoder
-        |
-        v
-SparseFeatures2Mesh + FlexiCubes
-        |
-        v
-raw reconstructed mesh
+/workspace/TRELLIS/results/shapenet_internals_stage1_mesh_reconstruction/
 ```
 
-The decoder path used TRELLIS' normal mesh extraction implementation. The evaluator called the same decoder that `TrellisImageTo3DPipeline.decode_slat` would use for mesh output.
+However, the current script contents are still the sparse-structure voxel reconstruction evaluator. The produced metrics file is byte-identical to:
 
-Results on the same 12-object subset:
+```text
+/workspace/TRELLIS/results/shapenet_internals_stage1_reconstruction/metrics.csv
+```
 
-- Successful mesh decodes: `12 / 12`
-- Mean predicted vertices: `248580.8`
-- Mean predicted faces: `496879.3`
-- Mean Chamfer L1: `0.018869`
-- Mean F-score @ `0.01`: `0.7989`
-- Mean surface-voxel IoU: `0.9234`
-- Mean surface-voxel precision: `0.9779`
-- Mean surface-voxel recall: `0.9428`
-- Mean surface-voxel F1: `0.9598`
-- Mean external recall: `0.9895`
-- Mean internal-candidate recall: `0.8865`
+Current pipeline:
 
-Visual findings:
+```text
+model_normalized.surface.binvox
+        |
+        v
+64^3 sparse voxel PLY
+        |
+        v
+SparseStructureEncoder
+        |
+        v
+sparse-structure latent
+        |
+        v
+SparseStructureDecoder
+        |
+        v
+reconstructed voxel grid
+```
 
-- Raw decoder meshes retained major internal structures in cabinets and file cabinets.
-- Voxel cross-sections showed mostly true-positive overlap for internal shelf and partition surfaces.
-- Some local misses and extra surfaces remain, especially in detailed internal layouts, but the decoder did not collapse objects to exterior-only shells.
+Artifacts:
 
-Important caveat:
+- `metrics.csv`: voxel overlap metrics for 12 samples
+- `recon_voxels/*.ply`: 12 reconstructed sparse voxel PLY files
 
-The internal/external split is approximate. External voxels were estimated as the first and last occupied GT surface voxels along the six cardinal grid directions. The remaining occupied GT surface voxels were treated as internal candidates. This is useful for screening, but not a perfect semantic internal-surface label.
+Results on the same 12-object subset are identical to Experiment 1:
+
+- Mean voxel IoU: `0.9996`
+- Mean precision: `0.9997`
+- Mean recall: `0.9999`
+- Mean F1: `0.9998`
+- Mean GT voxels: `11638.2`
+- Mean reconstructed voxels: `11639.6`
+
+Conclusion:
+
+These results confirm the sparse-structure round trip again, but they should not be interpreted as evidence about the SLAT mesh decoder. A true full mesh reconstruction experiment still needs `run_mesh_reconstruction_eval.py` to load SLAT latents, call the mesh decoder, write mesh artifacts, and compute mesh/surface metrics.
 
 ## 6. Key Findings and Next Steps
 
-The original concern was that TRELLIS' pretrained representation might erase internal geometry before any LoRA training could learn it. The sparse-structure and full mesh reconstruction experiments did not show that failure mode. Instead:
+The original concern was that TRELLIS' pretrained representation might erase internal geometry before any LoRA training could learn it. The sparse-structure reconstruction experiment did not show that failure mode. Instead:
 
 ```text
 surface voxels -> sparse-structure latent -> reconstructed voxels
 ```
 
-preserved internals almost perfectly, and:
+preserved internals almost perfectly. The current results do not yet test:
 
 ```text
 ShapeNet renders/features -> SLAT latent -> pretrained mesh decoder -> reconstructed mesh
 ```
 
-preserved internal-candidate geometry well enough to justify LoRA on the flow models.
+because the mesh reconstruction script currently runs the same sparse-structure voxel evaluator.
 
 The recommended next training direction is:
 
 1. Keep the pretrained encoders/decoders frozen initially.
-2. Add LoRA adapters to `SparseStructureFlowModel`.
-3. Fine-tune structure generation first.
-4. Validate generated sparse structures and internal voxel cross-sections.
-5. Add LoRA adapters to `ElasticSLatFlowModel` only after structure generation is working.
-
+2. Implement and run the true SLAT-to-mesh reconstruction evaluator.
+3. Add LoRA adapters to `SparseStructureFlowModel`.
+4. Fine-tune structure generation first.
+5. Validate generated sparse structures and internal voxel cross-sections.
+6. Add LoRA adapters to `ElasticSLatFlowModel` only after structure generation is working and the mesh decoder check is complete.

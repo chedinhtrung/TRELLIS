@@ -400,5 +400,4 @@ FodyWeavers.xsd
 __pycache__/
 
 datasets/
-results/
 ShapeNet
