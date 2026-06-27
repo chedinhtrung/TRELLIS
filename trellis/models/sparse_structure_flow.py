@@ -53,13 +53,15 @@ class TimestepEmbedder(nn.Module):
 
 
 class SparseStructureFlowModel(nn.Module):
-    """Dense DiT-style rectified-flow model for the structure latent grid.
+    """
+    Dense DiT-style rectified-flow model for the structure latent grid.
 
     Input/output tensors are dense 5D grids [B, C, R, R, R]. The model patchifies
     the grid into a token sequence, adds 3D positional embeddings, modulates each
     transformer block with the flow timestep, and cross-attends to text/image
-    conditioning tokens. Architecture changes to structure generation usually start
-    here.
+    conditioning tokens. 
+    
+    Architecture changes to structure generation usually start here!
     """
 
     def __init__(
@@ -183,7 +185,8 @@ class SparseStructureFlowModel(nn.Module):
         nn.init.constant_(self.out_layer.bias, 0)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        """Predict rectified-flow velocity for a dense structure latent.
+        """
+        Predict rectified-flow velocity for a dense structure latent.
 
         Args:
             x: Noisy latent grid [B, in_channels, R, R, R].

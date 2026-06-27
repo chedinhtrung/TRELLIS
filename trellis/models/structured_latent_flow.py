@@ -13,7 +13,8 @@ from .sparse_elastic_mixin import SparseTransformerElasticMixin
 
 
 class SparseResBlock3d(nn.Module):
-    """Sparse 3D residual block used around the SLAT transformer.
+    """
+    Sparse 3D residual block used around the SLAT transformer.
 
     The block preserves sparse coordinates while updating per-coordinate features.
     Optional up/downsampling changes coordinate resolution through sparse spatial
@@ -74,7 +75,8 @@ class SparseResBlock3d(nn.Module):
     
 
 class SLatFlowModel(nn.Module):
-    """Sparse rectified-flow model for SLAT features.
+    """
+    Sparse rectified-flow model for SLAT features.
 
     Input/output are `SparseTensor` objects. Coordinates encode generated occupied
     voxels as [num_points, 4] = (batch, x, y, z); features are the noisy latent

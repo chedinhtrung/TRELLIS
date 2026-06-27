@@ -22,29 +22,44 @@ class FlowEulerSampler(Sampler):
         self.sigma_min = sigma_min
 
     def _eps_to_xstart(self, x_t, t, eps):
+        """
+        Convert predicted noise eps into predicted clean data x_0. 
+        Used if the model predicts noise, but here the model predicts velocity, so this is mostly utility. 
+        """
         assert x_t.shape == eps.shape
         return (x_t - (self.sigma_min + (1 - self.sigma_min) * t) * eps) / (1 - t)
 
     def _xstart_to_eps(self, x_t, t, x_0):
+        """
+        Given noisy sampler x_t and clean prediction x_0, recover noise eps.
+        """
         assert x_t.shape == x_0.shape
         return (x_t - (1 - t) * x_0) / (self.sigma_min + (1 - self.sigma_min) * t)
 
     def _v_to_xstart_eps(self, x_t, t, v):
-        # Rectified-flow models predict velocity v = d x_t / d t. This helper
-        # converts that velocity into implied clean data x_0 and noise eps for
-        # logging/inspection; sampling itself integrates v directly.
+        """
+        Convert predicted velocity v into x_0 and eps. 
+        """
         assert x_t.shape == v.shape
         eps = (1 - t) * v + x_t
         x_0 = (1 - self.sigma_min) * x_t - (self.sigma_min + (1 - self.sigma_min) * t) * v
         return x_0, eps
 
     def _inference_model(self, model, x_t, t, cond=None, **kwargs):
+        """ 
+        Actually call the transformer. 
+        Given x_t, t and the conditioning token cond, predict the velocity v. 
+        """
+        # e.g. if internal t = 0.8, the model receives 800, because TRELLIS models are trained with timesteps in [0, 1000]
         t = torch.tensor([1000 * t] * x_t.shape[0], device=x_t.device, dtype=torch.float32)
         if cond is not None and cond.shape[0] == 1 and x_t.shape[0] > 1:
             cond = cond.repeat(x_t.shape[0], *([1] * (len(cond.shape) - 1)))
         return model(x_t, t, cond, **kwargs)
 
     def _get_model_prediction(self, model, x_t, t, cond=None, **kwargs):
+        """ 
+        Wrapper around _inference model. Given x_t, t and cond, predict x_0, eps and v. 
+        """
         pred_v = self._inference_model(model, x_t, t, cond, **kwargs)
         pred_x_0, pred_eps = self._v_to_xstart_eps(x_t=x_t, t=t, v=pred_v)
         return pred_x_0, pred_eps, pred_v
@@ -60,20 +75,8 @@ class FlowEulerSampler(Sampler):
         **kwargs
     ):
         """
-        Sample x_{t-1} from the model using Euler method.
-        
-        Args:
-            model: The model to sample from.
-            x_t: The [N x C x ...] tensor of noisy inputs at time t.
-            t: The current timestep.
-            t_prev: The previous timestep.
-            cond: conditional information.
-            **kwargs: Additional arguments for model inference.
-
-        Returns:
-            a dict containing the following
-            - 'pred_x_prev': x_{t-1}.
-            - 'pred_x_0': a prediction of x_0.
+        Sample x_{t-1} from the model using Euler method. Given the current noisy latent x_t, the model
+        predicts velocity v, and move one small step backward toward cleaner data x_prev. 
         """
         pred_x_0, pred_eps, pred_v = self._get_model_prediction(model, x_t, t, cond, **kwargs)
         pred_x_prev = x_t - (t - t_prev) * pred_v
@@ -91,22 +94,10 @@ class FlowEulerSampler(Sampler):
         **kwargs
     ):
         """
-        Generate samples from the model using Euler method.
-        
-        Args:
-            model: The model to sample from.
-            noise: The initial noise tensor.
-            cond: conditional information.
-            steps: The number of steps to sample.
-            rescale_t: The rescale factor for t.
-            verbose: If True, show a progress bar.
-            **kwargs: Additional arguments for model_inference.
-
-        Returns:
-            a dict containing the following
-            - 'samples': the model samples.
-            - 'pred_x_t': a list of prediction of x_t.
-            - 'pred_x_0': a list of prediction of x_0.
+        Run the full sampling loop. 
+        Start with sample = noise, then create timesteps e.g. [1, 0.75, 0.5, 0.25, 0], pair 
+        (1, 0.75), (0.75, 0.5), ..., and call sample_once for each pair. At the end, the output
+        is the final generated sample: ret.samples = sample. 
         """
         # Start at pure noise (t=1) and integrate backward to data (t=0).
         # `sample` can be a dense Tensor or TRELLIS SparseTensor because both
@@ -143,7 +134,7 @@ class FlowEulerCfgSampler(ClassifierFreeGuidanceSamplerMixin, FlowEulerSampler):
         **kwargs
     ):
         """
-        Generate samples from the model using Euler method.
+        Same as above, but add classifier-free guidance. Basically does: v = v_neg + cfg_strength * (v_cond - v_neg). 
         
         Args:
             model: The model to sample from.
@@ -167,7 +158,8 @@ class FlowEulerCfgSampler(ClassifierFreeGuidanceSamplerMixin, FlowEulerSampler):
 
 class FlowEulerGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, FlowEulerSampler):
     """
-    Generate samples from a flow-matching model using Euler sampling with classifier-free guidance and interval.
+    Same as classifier-free guidance, but only apply CFG during (0.2, 0.8).
+    Useful because strong CFG near the end can sometimes damage details. 
     """
     @torch.no_grad()
     def sample(

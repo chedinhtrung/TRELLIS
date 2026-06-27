@@ -20,7 +20,8 @@ def norm_layer(norm_type: str, *args, **kwargs) -> nn.Module:
 
 
 class ResBlock3d(nn.Module):
-    """Dense 3D residual block for voxel-grid VAEs.
+    """
+    Dense 3D residual block for voxel-grid VAEs.
 
     These blocks operate on tensors shaped [B, C, X, Y, Z]. They are plain
     convolutional utilities, not sparse operators.
