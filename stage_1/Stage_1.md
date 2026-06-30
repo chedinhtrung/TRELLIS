@@ -51,24 +51,41 @@ The `.csv` files under ShapeNet/ rank/filter ShapeNet objects by how much intern
 TRELLIS training does not train directly from raw .obj files. It expects a standardized preprocessed dataset directory. The target layout is:
 
 ```text
-datasets/<dataset_name>/
-  metadata.csv
-  splits/
-    train.txt
-    val.txt
-    test.txt
-  renders/<id>/
-    transforms.json
-    000.png
-    ...
-  renders_cond/<id>/
-    transforms.json
-    000.png
-    ...
-  voxels/<id>.ply
-  features/dinov2_vitl14_reg/<id>.npz
-  ss_latents/ss_enc_conv3d_16l8_fp16/<id>.npz
-  latents/dinov2_vitl14_reg_slat_enc_swin8_B_64l8_fp16/<id>.npz
+ShapeNetTRELLIS_nano/
+├── metadata.csv
+├── raw/
+│   └── <instance_id>/                  # symlink to original ShapeNet object folder
+│       ├── models/
+│       │   ├── model_normalized.obj
+│       │   └── model_normalized.mtl
+│       └── images/
+│           └── <texture files>
+├── renders/
+│   └── <instance_id>/
+│       ├── 000.png
+│       ├── 001.png
+│       ├── ...
+│       ├── mesh.ply                    # TRELLIS-normalized mesh
+│       └── transforms.json             # camera/view metadata
+├── voxels/
+│   └── <instance_id>.ply                # TRELLIS voxelization output
+├── features/
+│   └── <dinov2_model>/
+│       └── <instance_id>.npz            # projected per-voxel DINO features
+├── ss_latents/
+│   └── <sparse_structure_vae_name>/
+│       └── <instance_id>.npz            # sparse-structure VAE latent
+├── latents/
+│   └── <slat_vae_name>/
+│       └── <instance_id>.npz            # SLAT VAE latent
+├── renders_cond/
+│   └── <instance_id>/
+│       ├── 000.png
+│       └── transforms.json
+└── merged_records/
+    ├── <timestamp>_rendered_0.csv
+    ├── <timestamp>_voxelized_0.csv
+    └── ...
 ```
 
 Each component has a specific role:

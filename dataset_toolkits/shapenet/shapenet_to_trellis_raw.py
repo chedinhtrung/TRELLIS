@@ -9,6 +9,12 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
+"""
+    Copy (actually make symlinks for efficiency) a subset from ShapeNet to create a new dataset with the same shape 
+    that TRELLIS expects.
+    
+"""
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(

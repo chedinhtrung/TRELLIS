@@ -11,6 +11,8 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from plyfile import PlyData, PlyElement
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SHAPENET_ROOT = REPO_ROOT / "ShapeNet"
@@ -44,145 +46,6 @@ def read_metadata(dataset_dir: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def write_metadata(dataset_dir: Path, metadata: pd.DataFrame) -> None:
-    """
-    Write the dataset manifest back to metadata.csv.
-
-    Stage 1 scripts repeatedly update artifact flags such as voxelized or
-    rendered.  This helper keeps those updates consistent and guarantees
-    that the dataset folder exists before pandas writes the CSV file.
-    """
-    ensure_dir(dataset_dir)
-    metadata.to_csv(dataset_dir / "metadata.csv", index=False)
-
-
-def stable_id(category: str, object_id: str) -> str:
-    """
-    Build the stable (unique) sample id used throughout the converted dataset by 
-    combining the category and object id (ShapeNet object ids are only unique inside 
-    a category). 
-    """
-    return f"{category}__{object_id}"
-
-
-def parse_stable_id(sample_id: str) -> tuple[str, str]:
-    """
-    Split a Stage 1 sample id back into (category, object_id).
-    """
-    if "__" not in sample_id:
-        raise ValueError(f"Expected '<category>__<object_id>', got {sample_id}")
-    return sample_id.split("__", 1)
-
-
-def read_score_rows(shapenet_root: Path, category: str) -> dict[str, dict[str, str]]:
-    """
-    Read the per-category internal-geometry score CSV, if it exists.
-    """
-    path = shapenet_root / f"{category}_center_box_scores.csv"
-    if not path.exists():
-        return {}
-    with path.open(newline="") as fp:
-        return {row["model_id"]: row for row in csv.DictReader(fp)}
-
-
-def split_ids(ids: list[str]) -> dict[str, list[str]]:
-    """
-    Create a small deterministic train/val/test split.
-
-    The Stage 1 feasibility subset is tiny, so this uses simple slicing rather
-    than randomness: roughly 70/15/15 when there are enough samples, and all
-    available samples in train for very small inputs. Keeping the split
-    deterministic makes reruns easier to compare.
-    """
-    ids = list(ids)
-    n = len(ids)
-    if n == 0:
-        return {"train": [], "val": [], "test": []}
-    n_val = max(1, round(n * 0.15)) if n >= 3 else 0
-    n_test = max(1, round(n * 0.15)) if n >= 3 else 0
-    n_train = max(1, n - n_val - n_test)
-    return {
-        "train": ids[:n_train],
-        "val": ids[n_train:n_train + n_val],
-        "test": ids[n_train + n_val:],
-    }
-
-
-def write_splits(dataset_dir: Path, ids: list[str]) -> None:
-    """
-    Write splits/train.txt, val.txt, and test.txt.
-    """
-    split_dir = dataset_dir / "splits"
-    ensure_dir(split_dir)
-    splits = split_ids(ids)
-    for split, split_ids_ in splits.items():
-        (split_dir / f"{split}.txt").write_text(
-            "".join(f"{sample_id}\n" for sample_id in split_ids_),
-            encoding="utf-8",
-        )
-
-
-def assign_split(sample_id: str, dataset_dir: Path) -> str:
-    """
-    Look up which split contains a sample id.
-    """
-    for split in ("train", "val", "test"):
-        path = dataset_dir / "splits" / f"{split}.txt"
-        if path.exists() and sample_id in set(path.read_text(encoding="utf-8").splitlines()):
-            return split
-    return "train"
-
-
-def read_binvox(path: Path) -> tuple[np.ndarray, dict[str, object]]:
-    """
-    Take a .binvox file and return a normal 3D boolean occupancy grid along with its metadata. 
-    """
-    with path.open("rb") as fp:
-        header = fp.readline().decode("ascii", errors="replace").strip()
-        if not header.startswith("#binvox"):
-            raise ValueError(f"Not a binvox file: {path}")
-        dim_line = fp.readline().decode("ascii", errors="replace").strip().split()
-        translate_line = fp.readline().decode("ascii", errors="replace").strip().split()
-        scale_line = fp.readline().decode("ascii", errors="replace").strip().split()
-        data_line = fp.readline().decode("ascii", errors="replace").strip()
-        if dim_line[0] != "dim" or translate_line[0] != "translate" or scale_line[0] != "scale" or data_line != "data":
-            raise ValueError(f"Unexpected binvox header in {path}")
-        dims = tuple(int(v) for v in dim_line[1:4])
-        translate = tuple(float(v) for v in translate_line[1:4])
-        scale = float(scale_line[1])
-        raw = np.frombuffer(fp.read(), dtype=np.uint8)
-    if raw.size % 2 != 0:
-        raise ValueError(f"Corrupt binvox RLE payload in {path}")
-    values = raw[0::2].astype(np.bool_)
-    counts = raw[1::2].astype(np.int64)
-    dense = np.repeat(values, counts)
-    expected = int(np.prod(dims))
-    if dense.size != expected:
-        raise ValueError(f"Binvox payload size mismatch in {path}: got {dense.size}, expected {expected}")
-    grid = dense.reshape(dims)
-    return grid, {"dims": dims, "translate": translate, "scale": scale}
-
-
-def or_downsample(grid: np.ndarray, resolution: int) -> np.ndarray:
-    """
-    Downsample a cubic occupancy grid using OR/max pooling.
-    """
-    if grid.ndim != 3 or len(set(grid.shape)) != 1:
-        raise ValueError(f"Expected cubic 3D grid, got {grid.shape}")
-    source_resolution = grid.shape[0]
-    if source_resolution == resolution:
-        return grid.astype(bool, copy=False)
-    if source_resolution % resolution != 0:
-        raise ValueError(f"Cannot integer downsample {source_resolution} to {resolution}")
-    factor = source_resolution // resolution
-    reshaped = grid.reshape(
-        resolution, factor,
-        resolution, factor,
-        resolution, factor,
-    )
-    return reshaped.any(axis=(1, 3, 5))
-
-
 def grid_to_positions(grid: np.ndarray) -> np.ndarray:
     """
     Convert occupied voxel indices to a sparse 3D point cloud. TRELLIS stores sparse voxels as 
@@ -208,45 +71,39 @@ def positions_to_grid(positions: np.ndarray, resolution: int = 64) -> np.ndarray
     return grid
 
 
-def write_ply_points(path: Path, positions: np.ndarray) -> None:
-    """
-    Take a list of 3D points and save them as a .ply file. 
-    """
-    ensure_dir(path.parent)
-    positions = np.asarray(positions, dtype=np.float32).reshape(-1, 3)
-    with path.open("w", encoding="ascii") as fp:
-        fp.write("ply\n")
-        fp.write("format ascii 1.0\n")
-        fp.write(f"element vertex {positions.shape[0]}\n")
-        fp.write("property float x\n")
-        fp.write("property float y\n")
-        fp.write("property float z\n")
-        fp.write("end_header\n")
-        for x, y, z in positions:
-            fp.write(f"{x:.8f} {y:.8f} {z:.8f}\n")
+def write_ply_points(path: Path, points: np.ndarray) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    points = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+
+    vertices = np.empty(
+        len(points),
+        dtype=[
+            ("x", "f4"),
+            ("y", "f4"),
+            ("z", "f4"),
+        ],
+    )
+
+    vertices["x"] = points[:, 0]
+    vertices["y"] = points[:, 1]
+    vertices["z"] = points[:, 2]
+
+    ply = PlyData(
+        [PlyElement.describe(vertices, "vertex")],
+        text=False,  # False = binary, True = ASCII
+    )
+
+    ply.write(str(path))
+
 
 
 def read_ply_points(path: Path) -> np.ndarray:
-    """
-    Read a .ply file and return a list of 3D points. 
-    """
-    with path.open("r", encoding="ascii", errors="replace") as fp:
-        vertex_count = None
-        for line in fp:
-            line = line.strip()
-            if line.startswith("element vertex"):
-                vertex_count = int(line.split()[-1])
-            if line == "end_header":
-                break
-        if vertex_count is None:
-            raise ValueError(f"PLY vertex count not found: {path}")
-        rows = []
-        for _ in range(vertex_count):
-            parts = fp.readline().split()
-            if len(parts) < 3:
-                raise ValueError(f"Unexpected PLY vertex row in {path}")
-            rows.append([float(parts[0]), float(parts[1]), float(parts[2])])
-    return np.asarray(rows, dtype=np.float32)
+    ply = PlyData.read(path)
+    v = ply["vertex"]
+    points = np.stack([v["x"], v["y"], v["z"]], axis=1)
+    return points.astype(np.float32)
 
 
 def artifact_exists(path: Path) -> bool:
