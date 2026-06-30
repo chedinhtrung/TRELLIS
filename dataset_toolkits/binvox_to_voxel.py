@@ -89,7 +89,7 @@ if __name__ == '__main__':
                         help='Instances to process')
     parser.add_argument('--rank', type=int, default=0)
     parser.add_argument('--world_size', type=int, default=1)
-    parser.add_argument('--max_workers', type=int, default=None)
+    parser.add_argument('--max_workers', type=int, default=1)
     opt = parser.parse_args()
     opt = edict(vars(opt))
 

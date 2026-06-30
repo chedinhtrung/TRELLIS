@@ -1,4 +1,8 @@
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+from tqdm import tqdm
 import pandas as pd
 
 def category_to_caption(category):
@@ -21,20 +25,35 @@ def ensure_column(df, name, default):
 def add_args(parser):
     pass
 
-def foreach_instance(metadata, output_dir, func, max_workers=1, desc=None):
+def foreach_instance(metadata, output_dir, func, max_workers=1, desc='Processing objects') -> pd.DataFrame:
     records = []
     root = Path(output_dir).resolve()
+    metadata = metadata.to_dict('records')
+    max_workers = max_workers or os.cpu_count()
 
-    for _, row in metadata.iterrows():
-        local_path = Path(row["local_path"])
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor, \
+            tqdm(total=len(metadata), desc=desc) as pbar:
+            def worker(metadatum):
+                try:
+                    local_path = Path(metadatum["local_path"])
+                    sha256 = metadatum["sha256"]
 
-        if not local_path.is_absolute():
-            local_path = root / local_path
+                    if not local_path.is_absolute():
+                        local_path = root / local_path
 
-        record = func(str(local_path), row["sha256"])
+                    record = func(str(local_path), sha256)
+                    if record is not None:
+                        records.append(record)
+                    pbar.update()
+                except Exception as e:
+                    print(f"Error processing object {sha256}: {e}")
+                    pbar.update()
 
-        if record is not None:
-            records.append(record)
+            executor.map(worker, metadata)
+            executor.shutdown(wait=True)
+    except Exception:
+        print("Error happened during processing.")
 
     return pd.DataFrame.from_records(records)
 

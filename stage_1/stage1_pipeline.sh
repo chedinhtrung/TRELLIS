@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+trap 'status=$?; echo "[stage1] Pipeline failed with exit code $status"; read -r -p "Press Enter to exit..."' ERR
+
+REPO_ROOT="/workspace/TRELLIS"
+SHAPENET_PROCESSED="$REPO_ROOT/datasets/ShapeNetTRELLIS_nano"
+
+cd "$REPO_ROOT/dataset_toolkits"
+echo "[stage1] Preparing ShapeNetTRELLIS_nano subset"
+# simlink ShapeNet to ShapeNetTRELLIS_nano
+python shapenet/shapenet_to_trellis_raw.py \
+    --shapenet-root "$REPO_ROOT/datasets/ShapeNet" \
+    --categories car bus file_cabinet cabinet \
+    --limit 3 \
+    --outdir "$SHAPENET_PROCESSED"
+
+echo "[stage1] Starting render and render_cond in parallel"
+# run render and render_cond in parallel
+(
+    python render.py ShapeNet \
+        --output_dir "$SHAPENET_PROCESSED" \
+        --num_views 1 \
+        --max_workers 6 &
+
+    python render_cond.py ShapeNet \
+        --output_dir "$SHAPENET_PROCESSED" \
+        --num_views 1 \
+        --max_workers 6 &
+
+    wait  # for the render and render_cond to finish before continue
+)
+
+echo "[stage1] Ensuring metadata compliance"
+python shapenet/ensure_metadata_compliance.py \
+    --metadata "$SHAPENET_PROCESSED/metadata.csv"
+
+python build_metadata.py ShapeNet \
+    --output_dir "$SHAPENET_PROCESSED"
+
+echo "[stage1] Voxelizing meshes"
+# voxelize the mesh outputted by render.py then run sparese structure VAE eval
+python voxelize.py ShapeNet --output_dir "$SHAPENET_PROCESSED"
+
+python build_metadata.py ShapeNet \
+    --output_dir "$SHAPENET_PROCESSED"
+
+echo "[stage1] Running reconstruction evaluation"
+# run reconstruction evaluation of the sparse structure VAE
+cd "$REPO_ROOT/stage_1"
+python run_reconstruction_eval.py --dataset-dir "$SHAPENET_PROCESSED"
+
+echo "[stage1] Extracting features"
+cd "$REPO_ROOT/dataset_toolkits"
+python extract_feature.py \
+    --output_dir "$SHAPENET_PROCESSED" \
+    --batch_size 3
+
+python build_metadata.py ShapeNet \
+    --output_dir "$SHAPENET_PROCESSED"
+
+echo "[stage1] Encoding latents in parallel"
+(
+    python encode_latent.py --output_dir "$SHAPENET_PROCESSED" &
+    python encode_ss_latent.py --output_dir "$SHAPENET_PROCESSED" &
+    wait
+)
+
+python build_metadata.py ShapeNet \
+    --output_dir "$SHAPENET_PROCESSED"
+
+python run_mesh_reconstruction_eval.py --dataset-dir "$SHAPENET_PROCESSED"
+
