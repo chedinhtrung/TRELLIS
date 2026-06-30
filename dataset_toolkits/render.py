@@ -13,7 +13,7 @@ from utils import sphere_hammersley_sequence
 
 
 BLENDER_LINK = 'https://download.blender.org/release/Blender3.0/blender-3.0.1-linux-x64.tar.xz'
-BLENDER_INSTALLATION_PATH = '/tmp'
+BLENDER_INSTALLATION_PATH = '/workspace/thirdparty'
 BLENDER_PATH = f'{BLENDER_INSTALLATION_PATH}/blender-3.0.1-linux-x64/blender'
 
 def _install_blender():
@@ -52,7 +52,10 @@ def _render(file_path, sha256, output_dir, num_views):
     if file_path.endswith('.blend'):
         args.insert(1, file_path)
     
-    call(args, stdout=DEVNULL, stderr=DEVNULL)
+    #call(args, stdout=DEVNULL, stderr=DEVNULL)
+    print(" ".join(args), flush=True)
+    ret = call(args)
+    print("Blender return code:", ret, flush=True)
     
     if os.path.exists(os.path.join(output_folder, 'transforms.json')):
         return {'sha256': sha256, 'rendered': True}

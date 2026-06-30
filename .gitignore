@@ -399,5 +399,5 @@ FodyWeavers.xsd
 
 __pycache__/
 
-datasets/
-ShapeNet
+/datasets/
+/ShapeNet
