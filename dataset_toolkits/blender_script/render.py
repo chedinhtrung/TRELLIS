@@ -33,6 +33,32 @@ EXT = {
     'TARGA': 'tga'
 }
 
+def init_cycles_gpu():
+    prefs = bpy.context.preferences.addons['cycles'].preferences
+    enabled = []
+
+    for backend in ('OPTIX', 'CUDA'):
+        try:
+            prefs.compute_device_type = backend
+            prefs.get_devices()
+        except Exception as exc:
+            print(f'[WARN] Could not initialize Cycles {backend}: {exc}', flush=True)
+            continue
+
+        for device in prefs.devices:
+            device.use = device.type != 'CPU'
+        enabled = [device for device in prefs.devices if device.use]
+        if enabled:
+            bpy.context.scene.cycles.device = 'GPU'
+            print(f'[INFO] Cycles GPU backend: {backend}', flush=True)
+            for device in prefs.devices:
+                print(f'[INFO]   {device.name} ({device.type}) use={device.use}', flush=True)
+            return
+
+    bpy.context.scene.cycles.device = 'CPU'
+    print('[WARN] No Cycles GPU device enabled; falling back to CPU.', flush=True)
+
+
 def init_render(engine='CYCLES', resolution=512, geo_mode=False):
     bpy.context.scene.render.engine = engine
     bpy.context.scene.render.resolution_x = resolution
@@ -41,8 +67,10 @@ def init_render(engine='CYCLES', resolution=512, geo_mode=False):
     bpy.context.scene.render.image_settings.file_format = 'PNG'
     bpy.context.scene.render.image_settings.color_mode = 'RGBA'
     bpy.context.scene.render.film_transparent = True
+
+    if engine == 'CYCLES':
+        init_cycles_gpu()
     
-    bpy.context.scene.cycles.device = 'GPU'
     bpy.context.scene.cycles.samples = 128 if not geo_mode else 1
     bpy.context.scene.cycles.filter_type = 'BOX'
     bpy.context.scene.cycles.filter_width = 1
@@ -51,9 +79,6 @@ def init_render(engine='CYCLES', resolution=512, geo_mode=False):
     bpy.context.scene.cycles.transparent_max_bounces = 3 if not geo_mode else 0
     bpy.context.scene.cycles.transmission_bounces = 3 if not geo_mode else 1
     bpy.context.scene.cycles.use_denoising = True
-        
-    bpy.context.preferences.addons['cycles'].preferences.get_devices()
-    bpy.context.preferences.addons['cycles'].preferences.compute_device_type = 'CUDA'
     
 def init_nodes(save_depth=False, save_normal=False, save_albedo=False, save_mist=False):
     if not any([save_depth, save_normal, save_albedo, save_mist]):

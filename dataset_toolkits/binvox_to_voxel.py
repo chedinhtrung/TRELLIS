@@ -1,5 +1,6 @@
 import argparse
 import copy
+import json
 import os
 import sys
 from functools import partial
@@ -39,7 +40,10 @@ def _read_binvox(path: Path):
     expected = int(np.prod(dims))
     if dense.size != expected:
         raise ValueError(f"Binvox payload size mismatch in {path}: got {dense.size}, expected {expected}")
-    return dense.reshape(dims), translate, scale
+    # Binvox RLE is conventionally laid out as x, z, y. Convert to x, y, z
+    # so voxel coordinates line up with OBJ / Blender coordinates downstream.
+    grid = dense.reshape(dims).transpose(0, 2, 1)
+    return grid, translate, scale
 
 
 def _or_downsample(grid: np.ndarray, resolution: int = 64) -> np.ndarray:
@@ -59,13 +63,26 @@ def _or_downsample(grid: np.ndarray, resolution: int = 64) -> np.ndarray:
     return reshaped.any(axis=(1, 3, 5))
 
 
-def _grid_to_positions(grid: np.ndarray, translate: np.ndarray, scale: float) -> np.ndarray:
+def _grid_to_raw_positions(grid: np.ndarray, translate: np.ndarray, scale: float) -> np.ndarray:
     coords = np.argwhere(grid)
     if coords.size == 0:
         return np.zeros((0, 3), dtype=np.float32)
     dims = np.asarray(grid.shape, dtype=np.float32)
     unit = (coords.astype(np.float32) + 0.5) / dims
     return unit * scale + translate
+
+
+def _read_render_transform(output_dir: str, sha256: str) -> tuple[float, np.ndarray]:
+    path = Path(output_dir) / "renders" / sha256 / "transforms.json"
+    if not path.exists():
+        raise FileNotFoundError(f"Missing render transform: {path}")
+    with path.open("r", encoding="utf-8") as fp:
+        transform = json.load(fp)
+    return float(transform["scale"]), np.asarray(transform["offset"], dtype=np.float32)
+
+
+def _raw_to_render_positions(points: np.ndarray, render_scale: float, render_offset: np.ndarray) -> np.ndarray:
+    return (points * render_scale + render_offset).astype(np.float32)
 
 
 def _voxelize(file, sha256, output_dir, out_folder):
@@ -76,7 +93,9 @@ def _voxelize(file, sha256, output_dir, out_folder):
 
     grid, translate, scale = _read_binvox(source)
     grid = _or_downsample(grid, 64)
-    vertices = _grid_to_positions(grid, translate, scale)
+    raw_vertices = _grid_to_raw_positions(grid, translate, scale)
+    render_scale, render_offset = _read_render_transform(output_dir, sha256)
+    vertices = _raw_to_render_positions(raw_vertices, render_scale, render_offset)
     target = Path(output_dir) / out_folder / f"{sha256}.ply"
     utils3d.io.write_ply(str(target), vertices)
     return {"sha256": sha256, "voxelized": True, "num_voxels": len(vertices)}
@@ -103,9 +122,9 @@ if __name__ == '__main__':
     if opt.instances is None:
         if 'rendered' not in metadata.columns:
             raise ValueError('metadata.csv does not have "rendered" column, please run "build_metadata.py" first')
-        metadata = metadata[metadata['rendered'] == True]
         if 'voxelized' in metadata.columns and opt.out_folder == 'voxels':
-            metadata = metadata[metadata['voxelized'] == False]
+            #metadata = metadata[metadata['voxelized'] == False]
+            pass
     else:
         if os.path.exists(opt.instances):
             with open(opt.instances, 'r') as f:

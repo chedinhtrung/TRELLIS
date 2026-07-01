@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from common import (
 )
 
 sys.path.insert(0, str(REPO_ROOT))
+os.environ.setdefault("SPCONV_ALGO", "native")
 
 import trellis.models as models
 import trellis.modules.sparse as sp
