@@ -27,6 +27,8 @@ def _read_binvox(path: Path):
             raise ValueError(f"Unexpected binvox header in {path}")
         dims = tuple(int(v) for v in dim_line[1:4])
         raw = np.frombuffer(fp.read(), dtype=np.uint8)
+        translate = np.asarray([float(v) for v in translate_line[1:4]], dtype=np.float32)
+        scale = float(scale_line[1])
 
     if raw.size % 2 != 0:
         raise ValueError(f"Corrupt binvox RLE payload in {path}")
@@ -37,7 +39,7 @@ def _read_binvox(path: Path):
     expected = int(np.prod(dims))
     if dense.size != expected:
         raise ValueError(f"Binvox payload size mismatch in {path}: got {dense.size}, expected {expected}")
-    return dense.reshape(dims)
+    return dense.reshape(dims), translate, scale
 
 
 def _or_downsample(grid: np.ndarray, resolution: int = 64) -> np.ndarray:
@@ -57,12 +59,13 @@ def _or_downsample(grid: np.ndarray, resolution: int = 64) -> np.ndarray:
     return reshaped.any(axis=(1, 3, 5))
 
 
-def _grid_to_positions(grid: np.ndarray) -> np.ndarray:
+def _grid_to_positions(grid: np.ndarray, translate: np.ndarray, scale: float) -> np.ndarray:
     coords = np.argwhere(grid)
     if coords.size == 0:
         return np.zeros((0, 3), dtype=np.float32)
-    resolution = grid.shape[0]
-    return ((coords.astype(np.float32) + 0.5) / resolution - 0.5).astype(np.float32)
+    dims = np.asarray(grid.shape, dtype=np.float32)
+    unit = (coords.astype(np.float32) + 0.5) / dims
+    return unit * scale + translate
 
 
 def _voxelize(file, sha256, output_dir, out_folder):
@@ -71,9 +74,9 @@ def _voxelize(file, sha256, output_dir, out_folder):
     if not source.exists():
         raise FileNotFoundError(f"Missing surface binvox: {source}")
 
-    grid = _read_binvox(source)
+    grid, translate, scale = _read_binvox(source)
     grid = _or_downsample(grid, 64)
-    vertices = _grid_to_positions(grid)
+    vertices = _grid_to_positions(grid, translate, scale)
     target = Path(output_dir) / out_folder / f"{sha256}.ply"
     utils3d.io.write_ply(str(target), vertices)
     return {"sha256": sha256, "voxelized": True, "num_voxels": len(vertices)}
@@ -87,9 +90,8 @@ if __name__ == '__main__':
                         help='Folder name to write voxel PLY files into')
     parser.add_argument('--instances', type=str, default=None,
                         help='Instances to process')
-    parser.add_argument('--rank', type=int, default=0)
-    parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument('--max_workers', type=int, default=1)
+    
     opt = parser.parse_args()
     opt = edict(vars(opt))
 
@@ -112,9 +114,6 @@ if __name__ == '__main__':
             instances = opt.instances.split(',')
         metadata = metadata[metadata['sha256'].isin(instances)]
 
-    start = len(metadata) * opt.rank // opt.world_size
-    end = len(metadata) * (opt.rank + 1) // opt.world_size
-    metadata = metadata[start:end]
     records = []
 
     for sha256 in copy.copy(metadata['sha256'].values):

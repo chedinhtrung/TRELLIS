@@ -166,24 +166,3 @@ def run_command(
         raise subprocess.CalledProcessError(proc.returncode, cmd)
     return int(proc.returncode)
 
-
-def python_cmd(script: Path, *args: str) -> list[str]:
-    """
-    Build a command list that runs a Python script with this interpreter.
-    """
-    return [sys.executable, str(script), *args]
-
-
-def write_json(path: Path, data: object) -> None:
-    """
-    Write Python data into a JSON file. 
-    """
-    ensure_dir(path.parent)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-
-
-def list_existing(ids: Iterable[str], root: Path, suffix: str) -> list[str]:
-    """
-    Out of these sample IDs, return the ones that already have the expected output file (suffix). 
-    """
-    return [sample_id for sample_id in ids if artifact_exists(root / f"{sample_id}{suffix}")]
