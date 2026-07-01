@@ -69,5 +69,6 @@ echo "[stage1] Encoding latents in parallel"
 python build_metadata.py ShapeNet \
     --output_dir "$SHAPENET_PROCESSED"
 
-#python run_mesh_reconstruction_eval.py --dataset-dir "$SHAPENET_PROCESSED"
+cd "$REPO_ROOT/stage_1"
+python run_mesh_reconstruction_eval.py --dataset-dir "$SHAPENET_PROCESSED"
 
