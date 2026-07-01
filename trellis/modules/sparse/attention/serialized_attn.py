@@ -1,6 +1,7 @@
 from typing import *
 from enum import Enum
 import torch
+import torch.nn.functional as F
 import math
 from .. import SparseTensor
 from .. import DEBUG, ATTN
@@ -9,6 +10,8 @@ if ATTN == 'xformers':
     import xformers.ops as xops
 elif ATTN == 'flash_attn':
     import flash_attn
+elif ATTN in ['sdpa', 'naive']:
+    pass
 else:
     raise ValueError(f"Unknown attention module: {ATTN}")
 
@@ -16,6 +19,20 @@ else:
 __all__ = [
     'sparse_serialized_scaled_dot_product_self_attention',
 ]
+
+
+def _varlen_sdpa(qkv: torch.Tensor, seq_lens: List[int]) -> torch.Tensor:
+    outs = []
+    start = 0
+    for seq_len in seq_lens:
+        q, k, v = qkv[start:start + seq_len].unbind(dim=1)
+        q = q.permute(1, 0, 2).unsqueeze(0)
+        k = k.permute(1, 0, 2).unsqueeze(0)
+        v = v.permute(1, 0, 2).unsqueeze(0)
+        out = F.scaled_dot_product_attention(q, k, v)
+        outs.append(out.squeeze(0).permute(1, 0, 2))
+        start += seq_len
+    return torch.cat(outs, dim=0)
 
 
 class SerializeMode(Enum):
@@ -168,6 +185,12 @@ def sparse_serialized_scaled_dot_product_self_attention(
             out = xops.memory_efficient_attention(q, k, v)          # [B, N, H, C]
         elif ATTN == 'flash_attn':
             out = flash_attn.flash_attn_qkvpacked_func(qkv_feats)   # [B, N, H, C]
+        elif ATTN in ['sdpa', 'naive']:
+            q, k, v = qkv_feats.unbind(dim=2)
+            q = q.permute(0, 2, 1, 3)
+            k = k.permute(0, 2, 1, 3)
+            v = v.permute(0, 2, 1, 3)
+            out = F.scaled_dot_product_attention(q, k, v).permute(0, 2, 1, 3)
         else:
             raise ValueError(f"Unknown attention module: {ATTN}")
         out = out.reshape(B * N, H, C)                              # [M, H, C]
@@ -183,6 +206,8 @@ def sparse_serialized_scaled_dot_product_self_attention(
             cu_seqlens = torch.cat([torch.tensor([0]), torch.cumsum(torch.tensor(seq_lens), dim=0)], dim=0) \
                         .to(qkv.device).int()
             out = flash_attn.flash_attn_varlen_qkvpacked_func(qkv_feats, cu_seqlens, max(seq_lens)) # [M, H, C]
+        elif ATTN in ['sdpa', 'naive']:
+            out = _varlen_sdpa(qkv_feats, seq_lens)
 
     out = out[bwd_indices]      # [T, H, C]
 

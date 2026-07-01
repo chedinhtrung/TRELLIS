@@ -13,6 +13,7 @@ from .base import Trainer
 from ..utils.general_utils import *
 from ..utils.dist_utils import *
 from ..utils import grad_clip_utils, elastic_utils
+from ..modules.lora import has_lora, lora_state_dict
 
 
 class BasicTrainer(Trainer):
@@ -233,6 +234,11 @@ class BasicTrainer(Trainer):
         model_ckpts = self._master_params_to_state_dicts(self.master_params)
         for name, model_ckpt in model_ckpts.items():
             torch.save(model_ckpt, os.path.join(self.output_dir, 'ckpts', f'{name}_step{self.step:07d}.pt'))
+            if has_lora(self.models[name]):
+                torch.save(
+                    lora_state_dict(self.models[name]),
+                    os.path.join(self.output_dir, 'ckpts', f'{name}_lora_step{self.step:07d}.pt')
+                )
         
         for i, ema_rate in enumerate(self.ema_rate):
             ema_ckpts = self._master_params_to_state_dicts(self.ema_params[i])

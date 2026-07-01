@@ -5,6 +5,17 @@ from . import BACKEND, DEBUG
 SparseTensorData = None # Lazy import
 
 
+def _get_sparse_tensor_data():
+    global SparseTensorData
+    if SparseTensorData is None:
+        import importlib
+        if BACKEND == 'torchsparse':
+            SparseTensorData = importlib.import_module('torchsparse').SparseTensor
+        elif BACKEND == 'spconv':
+            SparseTensorData = importlib.import_module('spconv.pytorch').SparseConvTensor
+    return SparseTensorData
+
+
 __all__ = [
     'SparseTensor',
     'sparse_batch_broadcast',
@@ -42,13 +53,7 @@ class SparseTensor:
 
     def __init__(self, *args, **kwargs):
         # Lazy import of sparse tensor backend
-        global SparseTensorData
-        if SparseTensorData is None:
-            import importlib
-            if BACKEND == 'torchsparse':
-                SparseTensorData = importlib.import_module('torchsparse').SparseTensor
-            elif BACKEND == 'spconv':
-                SparseTensorData = importlib.import_module('spconv.pytorch').SparseConvTensor
+        sparse_tensor_data = _get_sparse_tensor_data()
                 
         method_id = 0
         if len(args) != 0:
@@ -78,10 +83,10 @@ class SparseTensor:
                 # Many losses/decoders use it to process each sample independently.
                 layout = self.__cal_layout(coords, shape[0])
             if BACKEND == 'torchsparse':
-                self.data = SparseTensorData(feats, coords, **kwargs)
+                self.data = sparse_tensor_data(feats, coords, **kwargs)
             elif BACKEND == 'spconv':
                 spatial_shape = list(coords.max(0)[0] + 1)[1:]
-                self.data = SparseTensorData(feats.reshape(feats.shape[0], -1), coords, spatial_shape, shape[0], **kwargs)
+                self.data = sparse_tensor_data(feats.reshape(feats.shape[0], -1), coords, spatial_shape, shape[0], **kwargs)
                 self.data._features = feats
         elif method_id == 1:
             data, shape, layout = args + (None,) * (3 - len(args))
@@ -253,10 +258,11 @@ class SparseTensor:
         # Core helper used throughout sparse models: create a new SparseTensor with
         # updated features, preserving backend caches/layout when coordinates do not
         # change. This is why most layers call x.replace(new_feats).
+        sparse_tensor_data = _get_sparse_tensor_data()
         new_shape = [self.shape[0]]
         new_shape.extend(feats.shape[1:])
         if BACKEND == 'torchsparse':
-            new_data = SparseTensorData(
+            new_data = sparse_tensor_data(
                 feats=feats,
                 coords=self.data.coords if coords is None else coords,
                 stride=self.data.stride,
@@ -264,7 +270,7 @@ class SparseTensor:
             )
             new_data._caches = self.data._caches
         elif BACKEND == 'spconv':
-            new_data = SparseTensorData(
+            new_data = sparse_tensor_data(
                 self.data.features.reshape(self.data.features.shape[0], -1),
                 self.data.indices,
                 self.data.spatial_shape,

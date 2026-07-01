@@ -16,6 +16,17 @@ from ..utils.general_utils import *
 from ..utils.data_utils import recursive_to_device, cycle, ResumableSampler
 
 
+def _json_default(obj):
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, torch.Tensor):
+        obj = obj.detach().cpu()
+        return obj.item() if obj.ndim == 0 else obj.tolist()
+    raise TypeError(f'Object of type {obj.__class__.__name__} is not JSON serializable')
+
+
 class Trainer:
     """
     Base class for training.
@@ -46,6 +57,8 @@ class Trainer:
         i_sample=10000,
         i_save=10000,
         i_ddpcheck=10000,
+        sample_at_start=True,
+        sample_at_end=True,
         **kwargs
     ):
         assert batch_size is not None or batch_size_per_gpu is not None, 'Either batch_size or batch_size_per_gpu must be specified.'
@@ -72,6 +85,8 @@ class Trainer:
         self.i_sample = i_sample
         self.i_save = i_save
         self.i_ddpcheck = i_ddpcheck        
+        self.sample_at_start = sample_at_start
+        self.sample_at_end = sample_at_end
 
         if dist.is_initialized():
             # Multi-GPU params
@@ -350,11 +365,13 @@ class Trainer:
         """
         if self.is_master:
             print('\nStarting training...')
-            self.snapshot_dataset()
-        if self.step == 0:
-            self.snapshot(suffix='init')
-        else: # resume
-            self.snapshot(suffix=f'resume_step{self.step:07d}')
+            if self.sample_at_start:
+                self.snapshot_dataset()
+        if self.sample_at_start:
+            if self.step == 0:
+                self.snapshot(suffix='init')
+            else: # resume
+                self.snapshot(suffix=f'resume_step{self.step:07d}')
 
         log = []
         time_last_print = 0.0
@@ -387,7 +404,7 @@ class Trainer:
                 self.check_ddp()
 
             # Sample images
-            if self.step % self.i_sample == 0:
+            if self.i_sample is not None and self.i_sample > 0 and self.step % self.i_sample == 0:
                 self.snapshot()
 
             if self.is_master:
@@ -413,7 +430,7 @@ class Trainer:
                 if self.step % self.i_log == 0:
                     ## save to log file
                     log_str = '\n'.join([
-                        f'{step}: {json.dumps(log)}' for step, log in log
+                        f'{step}: {json.dumps(log, default=_json_default)}' for step, log in log
                     ])
                     with open(os.path.join(self.output_dir, 'log.txt'), 'a') as log_file:
                         log_file.write(log_str + '\n')
@@ -430,8 +447,9 @@ class Trainer:
                 if self.step % self.i_save == 0:
                     self.save()
 
-        if self.is_master:
+        if self.is_master and self.sample_at_end:
             self.snapshot(suffix='final')
+        if self.is_master:
             self.writer.close()
             print('Training finished.')
             

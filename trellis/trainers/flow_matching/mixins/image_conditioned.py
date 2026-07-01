@@ -1,4 +1,5 @@
 from typing import *
+import os
 import torch
 import torch.nn.functional as F
 from torchvision import transforms
@@ -19,6 +20,11 @@ class ImageConditionedMixin:
         super().__init__(*args, **kwargs)
         self.image_cond_model_name = image_cond_model
         self.image_cond_model = None     # the model is init lazily
+
+    @staticmethod
+    def _configure_dinov2_backend():
+        if os.environ.get('TRELLIS_USE_DINOV2_XFORMERS') != '1':
+            os.environ.setdefault('XFORMERS_DISABLED', '1')
         
     @staticmethod
     def prepare_for_training(image_cond_model: str, **kwargs):
@@ -28,12 +34,14 @@ class ImageConditionedMixin:
         if hasattr(super(ImageConditionedMixin, ImageConditionedMixin), 'prepare_for_training'):
             super(ImageConditionedMixin, ImageConditionedMixin).prepare_for_training(**kwargs)
         # download the model
+        ImageConditionedMixin._configure_dinov2_backend()
         torch.hub.load('facebookresearch/dinov2', image_cond_model, pretrained=True)
         
     def _init_image_cond_model(self):
         """
         Initialize the image conditioning model.
         """
+        self._configure_dinov2_backend()
         with dist_utils.local_master_first():
             dinov2_model = torch.hub.load('facebookresearch/dinov2', self.image_cond_model_name, pretrained=True)
         dinov2_model.eval().cuda()

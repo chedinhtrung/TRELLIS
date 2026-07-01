@@ -11,6 +11,7 @@ import numpy as np
 import random
 
 from trellis import models, datasets, trainers
+from trellis.modules.lora import apply_lora
 from trellis.utils.dist_utils import setup_dist
 
 
@@ -56,6 +57,27 @@ def get_model_summary(model):
     return model_summary
 
 
+def build_model(model_cfg):
+    pretrained = model_cfg.get('pretrained', None)
+    if pretrained is None:
+        model = getattr(models, model_cfg.name)(**model_cfg.args)
+    else:
+        model = models.from_pretrained(pretrained, model_name=model_cfg.name, model_args=model_cfg.args)
+    model = model.cuda()
+
+    lora_cfg = model_cfg.get('lora', None)
+    if lora_cfg is not None:
+        trainable = apply_lora(
+            model,
+            rank=lora_cfg.get('rank', 8),
+            alpha=lora_cfg.get('alpha', 8.0),
+            dropout=lora_cfg.get('dropout', 0.0),
+            target_patterns=lora_cfg.get('target_patterns', None),
+        )
+        print(f'Applied LoRA to {model.__class__.__name__}: {trainable} trainable parameters')
+    return model
+
+
 def main(local_rank, cfg):
     # Set up distributed training
     rank = cfg.node_rank * cfg.num_gpus + local_rank
@@ -70,10 +92,7 @@ def main(local_rank, cfg):
     dataset = getattr(datasets, cfg.dataset.name)(cfg.data_dir, **cfg.dataset.args)
 
     # Build model
-    model_dict = {
-        name: getattr(models, model.name)(**model.args).cuda()
-        for name, model in cfg.models.items()
-    }
+    model_dict = {name: build_model(model) for name, model in cfg.models.items()}
 
     # Model summary
     if rank == 0:

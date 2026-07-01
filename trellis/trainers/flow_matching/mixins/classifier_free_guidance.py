@@ -32,14 +32,14 @@ class ClassifierFreeGuidanceMixin:
             
             def select(cond, neg_cond, mask):
                 if isinstance(cond, torch.Tensor):
-                    mask = torch.tensor(mask, device=cond.device).reshape(-1, *[1] * (cond.ndim - 1))
+                    mask = torch.tensor(mask, device=cond.device, dtype=torch.bool).reshape(-1, *[1] * (cond.ndim - 1))
                     return torch.where(mask, neg_cond, cond)
                 elif isinstance(cond, list):
                     return [nc if m else c for c, nc, m in zip(cond, neg_cond, mask)]
                 else:
                     raise ValueError(f"Unsupported type of cond: {type(cond)}")
             
-            mask = list(np.random.rand(B) < self.p_uncond)
+            mask = [bool(m) for m in np.random.rand(B) < self.p_uncond]
             if not isinstance(cond, dict):
                 cond = select(cond, neg_cond, mask)
             else:

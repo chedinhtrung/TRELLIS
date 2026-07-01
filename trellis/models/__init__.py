@@ -37,13 +37,15 @@ def __getattr__(name):
     return globals()[name]
 
 
-def from_pretrained(path: str, **kwargs):
+def from_pretrained(path: str, model_name: str = None, model_args: dict = None, **kwargs):
     """
     Load a model from a pretrained checkpoint.
 
     Args:
         path: The path to the checkpoint. Can be either local path or a Hugging Face model name.
               NOTE: config file and model file should take the name f'{path}.json' and f'{path}.safetensors' respectively.
+        model_name: Optional model class name to use instead of the checkpoint config name.
+        model_args: Optional model constructor args to use instead of the checkpoint config args.
         **kwargs: Additional arguments for the model constructor.
     """
     import os
@@ -58,13 +60,13 @@ def from_pretrained(path: str, **kwargs):
         from huggingface_hub import hf_hub_download
         path_parts = path.split('/')
         repo_id = f'{path_parts[0]}/{path_parts[1]}'
-        model_name = '/'.join(path_parts[2:])
-        config_file = hf_hub_download(repo_id, f"{model_name}.json")
-        model_file = hf_hub_download(repo_id, f"{model_name}.safetensors")
+        checkpoint_name = '/'.join(path_parts[2:])
+        config_file = hf_hub_download(repo_id, f"{checkpoint_name}.json")
+        model_file = hf_hub_download(repo_id, f"{checkpoint_name}.safetensors")
 
     with open(config_file, 'r') as f:
         config = json.load(f)
-    model = __getattr__(config['name'])(**config['args'], **kwargs)
+    model = __getattr__(model_name or config['name'])(**(model_args or config['args']), **kwargs)
     model.load_state_dict(load_file(model_file))
 
     return model

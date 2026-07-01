@@ -86,7 +86,8 @@ class SLatVisMixin:
             tile = [2, 2]
             for j, (ext, intr) in enumerate(zip(exts, ints)):
                 res = renderer.render(representation, ext, intr)
-                image[:, 512 * (j // tile[1]):512 * (j // tile[1] + 1), 512 * (j % tile[1]):512 * (j % tile[1] + 1)] = res['color']
+                render_image = res['color'] if 'color' in res else res['normal']
+                image[:, 512 * (j // tile[1]):512 * (j // tile[1] + 1), 512 * (j % tile[1]):512 * (j % tile[1] + 1)] = render_image
             images.append(image)
         images = torch.stack(images)
             
