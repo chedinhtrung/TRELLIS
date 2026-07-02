@@ -52,6 +52,42 @@ class SparseFlowMatchingTrainer(FlowMatchingTrainer):
         t_schedule (dict): Time schedule for flow matching.
         sigma_min (float): Minimum noise level.
     """
+
+    def __init__(self, *args, invisible_weight_scalar: float = -1.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.invisible_weight_scalar = float(invisible_weight_scalar)
+        print(f"[SparseFlowMatchingTrainer] invisible_weight_scalar = {self.invisible_weight_scalar}")
+
+    def axis_extrema_surface_mask(self, coords_xyz: torch.Tensor) -> torch.Tensor:
+        """Return a boolean mask of voxels on the surface of the object (visible).
+
+        A voxel is marked as surface if it is the min/max index along x, y, or z
+        within any 1D axis-aligned line.
+        """
+        num_points = coords_xyz.shape[0]
+        if num_points == 0:
+            return torch.zeros(0, dtype=torch.bool, device=coords_xyz.device)
+
+        surface_mask = torch.zeros(num_points, dtype=torch.bool, device=coords_xyz.device)
+
+        def mark_extrema(group_cols: List[int], value_col: int) -> None:
+            keys = coords_xyz[:, group_cols]
+            values = coords_xyz[:, value_col]
+            _, inverse = torch.unique(keys, dim=0, return_inverse=True)
+            for group_id in range(int(inverse.max().item()) + 1):
+                group_idx = torch.nonzero(inverse == group_id, as_tuple=False).flatten()
+                if group_idx.numel() == 0:
+                    continue
+                group_vals = values[group_idx]
+                min_idx = group_idx[torch.argmin(group_vals)]
+                max_idx = group_idx[torch.argmax(group_vals)]
+                surface_mask[min_idx] = True
+                surface_mask[max_idx] = True
+
+        mark_extrema([1, 2], 0)  # x-extrema along each (y, z) line
+        mark_extrema([0, 2], 1)  # y-extrema along each (x, z) line
+        mark_extrema([0, 1], 2)  # z-extrema along each (x, y) line
+        return surface_mask
     
     def prepare_dataloader(self, **kwargs):
         """
@@ -104,16 +140,41 @@ class SparseFlowMatchingTrainer(FlowMatchingTrainer):
         assert pred.shape == noise.shape == x_0.shape
         target = self.get_v(x_0, noise, t)
         terms = edict()
-        # Loss is computed on the sparse feature matrix. The SparseTensor wrapper
-        # carries coords/layout, but regression happens only on per-point features.
-        terms["mse"] = F.mse_loss(pred.feats, target.feats)
+
+        # Loss is computed on sparse features. By default (scalar <= 0) this is a
+        # uniform mean MSE. If scalar > 0, voxels outside the axis-extrema surface
+        # proxy are upweighted as "invisible" voxels.
+        if self.invisible_weight_scalar <= 0:
+            terms["mse"] = F.mse_loss(pred.feats, target.feats)
+            mse_per_instance = np.array([
+                F.mse_loss(pred.feats[x_0.layout[i]], target.feats[x_0.layout[i]]).item()
+                for i in range(x_0.shape[0])
+            ])
+        else:   # weigh MSE loss on visibility. If voxel on surface (surface mask), weight = 1.  #
+                # if voxel not on surface, weight = invisible_weight_scalar.
+            token_mse = (pred.feats - target.feats).pow(2).mean(dim=1)
+            sample_losses = []
+            mse_per_instance = []
+            for i in range(x_0.shape[0]):
+                rows = x_0.layout[i]
+                sample_mse = token_mse[rows]
+                sample_coords = x_0.coords[rows, 1:]
+                surface_mask = self.axis_extrema_surface_mask(sample_coords)
+                invisible_mask = ~surface_mask
+
+                weights = torch.ones_like(sample_mse)
+                weights[invisible_mask] = self.invisible_weight_scalar
+
+                weighted_mse = (sample_mse * weights).sum() / weights.sum().clamp_min(1e-6)
+                sample_losses.append(weighted_mse)
+                mse_per_instance.append(weighted_mse.item())
+
+            terms["mse"] = torch.stack(sample_losses).mean()
+            mse_per_instance = np.array(mse_per_instance)
+
         terms["loss"] = terms["mse"]
 
         # log loss with time bins
-        mse_per_instance = np.array([
-            F.mse_loss(pred.feats[x_0.layout[i]], target.feats[x_0.layout[i]]).item()
-            for i in range(x_0.shape[0])
-        ])
         time_bin = np.digitize(t.cpu().numpy(), np.linspace(0, 1, 11)) - 1
         for i in range(10):
             if (time_bin == i).sum() != 0:
