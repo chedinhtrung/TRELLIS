@@ -36,7 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit",
         type=int,
-        required=True,
+        required=False,
+        default=1e10,
         help="Maximum number of objects per category.",
     )
     parser.add_argument(
@@ -135,15 +136,21 @@ def collect_samples(shapenet_root: Path, categories: list[str], limit: int) -> l
     return samples
 
 
-def split_samples(samples: list[dict], train: float, val: float) -> dict[str, list[dict]]:
-    total = len(samples)
-    train_count = int(total * train)
-    val_count = int(total * val)
-    return {
-        "train": samples[:train_count],
-        "val": samples[train_count:train_count + val_count],
-        "test": samples[train_count + val_count:],
-    }
+def split_samples(samples: list[dict], train: float, val: float, test: float) -> dict[str, list[dict]]:
+    splits: dict[str, list[dict]] = {"train": [], "val": [], "test": []}
+    categories = sorted({sample["category"] for sample in samples})
+
+    for category in categories:
+        category_samples = [sample for sample in samples if sample["category"] == category]
+        total = len(category_samples)
+        train_end = int(total * train)
+        val_end = train_end + int(total * val)
+
+        splits["train"].extend(category_samples[:train_end])
+        splits["val"].extend(category_samples[train_end:val_end])
+        splits["test"].extend(category_samples[val_end:])
+
+    return splits
 
 
 def write_split(split_dir: Path, split_name: str, samples: list[dict], overwrite: bool) -> None:
@@ -191,7 +198,7 @@ def main() -> None:
     if not samples:
         raise RuntimeError("No ShapeNet objects were selected.")
 
-    splits = split_samples(samples, args.train, args.val)
+    splits = split_samples(samples, args.train, args.val, args.test)
     for split_name, split_samples_ in splits.items():
         write_split(args.outdir / split_name, split_name, split_samples_, args.overwrite)
 

@@ -24,7 +24,7 @@ def _install_blender():
         os.system(f'tar -xvf {BLENDER_INSTALLATION_PATH}/blender-3.0.1-linux-x64.tar.xz -C {BLENDER_INSTALLATION_PATH}')
 
 
-def _render(file_path, sha256, output_dir, num_views):
+def _render(file_path, sha256, output_dir, num_views, engine, resolution, samples, denoise):
     output_folder = os.path.join(output_dir, 'renders', sha256)
     
     # Build camera {yaw, pitch, radius, fov}
@@ -44,16 +44,16 @@ def _render(file_path, sha256, output_dir, num_views):
         '--',
         '--views', json.dumps(views),
         '--object', os.path.expanduser(file_path),
-        '--resolution', '512',
+        '--resolution', str(resolution),
         '--output_folder', output_folder,
-        '--engine', 'CYCLES',
-        '--save_mesh',
+        '--engine', engine,
+        '--samples', str(samples),
     ]
+    if denoise:
+        args.append('--denoise')
     if file_path.endswith('.blend'):
         args.insert(1, file_path)
     
-    #call(args, stdout=DEVNULL, stderr=DEVNULL)
-    print(" ".join(args), flush=True)
     ret = call(args)
     print("Blender return code:", ret, flush=True)
     
@@ -73,6 +73,14 @@ if __name__ == '__main__':
                         help='Instances to process')
     parser.add_argument('--num_views', type=int, default=150,
                         help='Number of views to render')
+    parser.add_argument('--engine', type=str, default='CYCLES',
+                        help='Blender render engine to use')
+    parser.add_argument('--resolution', type=int, default=512,
+                        help='Render resolution for each image')
+    parser.add_argument('--samples', type=int, default=128,
+                        help='Cycles sample count when using Cycles engine')
+    parser.add_argument('--denoise', action='store_true',
+                        help='Enable Cycles denoising')
     dataset_utils.add_args(parser)
     parser.add_argument('--rank', type=int, default=0)
     parser.add_argument('--world_size', type=int, default=1)
@@ -118,7 +126,15 @@ if __name__ == '__main__':
     print(f'Processing {len(metadata)} objects...')
 
     # process objects
-    func = partial(_render, output_dir=opt.output_dir, num_views=opt.num_views)
+    func = partial(
+        _render,
+        output_dir=opt.output_dir,
+        num_views=opt.num_views,
+        engine=opt.engine,
+        resolution=opt.resolution,
+        samples=opt.samples,
+        denoise=opt.denoise,
+    )
     rendered = dataset_utils.foreach_instance(metadata, opt.output_dir, func, max_workers=opt.max_workers, desc='Rendering objects')
     rendered = pd.concat([rendered, pd.DataFrame.from_records(records)])
     rendered.to_csv(os.path.join(opt.output_dir, f'rendered_{opt.rank}.csv'), index=False)

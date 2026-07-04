@@ -2,34 +2,73 @@ set -euo pipefail
 trap 'status=$?; echo "[stage1] Pipeline failed with exit code $status"; read -r -p "Press Enter to exit..."' ERR
 
 REPO_ROOT="/workspace/TRELLIS"
-SHAPENET_PROCESSED="$REPO_ROOT/datasets/ShapeNetTRELLIS_nano"
+SHAPENET_PROCESSED="$REPO_ROOT/datasets/ShapeNetTRELLIS_full"
 export SPCONV_ALGO="${SPCONV_ALGO:-native}"
 
 cd "$REPO_ROOT/dataset_toolkits"
-echo "[stage1] Preparing ShapeNetTRELLIS_nano subset"
+echo "[stage1] Preparing ShapeNetTRELLIS_full subset"
 # simlink ShapeNet to ShapeNetTRELLIS_nano
 python shapenet/shapenet_to_trellis_raw.py \
     --shapenet-root "$REPO_ROOT/datasets/ShapeNet" \
     --categories car bus file_cabinet cabinet \
-    --limit 3 \
     --outdir "$SHAPENET_PROCESSED"
 
-echo "[stage1] Starting render and render_cond in parallel"
-# run render and render_cond in parallel
-# this is to create multiview images and conditional images
-(
+echo "[stage1] Rendering images"
+for split in train val test; do
+    echo "[stage1] Rendering $split split"
+
     python render.py ShapeNet \
-        --output_dir "$SHAPENET_PROCESSED" \
-        --num_views 150 \
-        --max_workers 6 &
+        --output_dir "$SHAPENET_PROCESSED/$split" \
+        --num_views 4 \
+        --engine BLENDER_EEVEE \
+        --resolution 256 \
+        --samples 1 \
+        --max_workers 1 &
 
     python render_cond.py ShapeNet \
-        --output_dir "$SHAPENET_PROCESSED" \
-        --num_views 150 \
-        --max_workers 6 &
+        --output_dir "$SHAPENET_PROCESSED/$split" \
+        --num_views 1 \
+        --engine BLENDER_EEVEE \
+        --resolution 256 \
+        --samples 1 \
+        --max_workers 1 &
 
-    wait  # for the render and render_cond to finish before continue
-)
+    wait
+
+    echo "[stage1] Ensuring metadata compliance"
+    python shapenet/ensure_metadata_compliance.py \
+        --metadata "$SHAPENET_PROCESSED/$split/metadata.csv"
+    
+    python build_metadata.py ShapeNet \
+    --output_dir "$SHAPENET_PROCESSED/$split"
+
+    echo "[stage1] Voxelizing $split split"
+    python voxelize.py ShapeNet \
+        --output_dir "$SHAPENET_PROCESSED/$split"
+    
+    python build_metadata.py ShapeNet \
+    --output_dir "$SHAPENET_PROCESSED/$split"
+
+    echo "[stage1] Extracting features for $split split"
+    python extract_feature.py \
+        --output_dir "$SHAPENET_PROCESSED/$split"
+
+    python build_metadata.py ShapeNet \
+        --output_dir "$SHAPENET_PROCESSED/$split"
+
+    echo "[stage1] Encoding sparse-structure latents for $split split"
+    python encode_ss_latent.py \
+        --output_dir "$SHAPENET_PROCESSED/$split" &
+
+    echo "[stage1] Encoding SLAT latents for $split split"
+    python encode_latent.py \
+        --output_dir "$SHAPENET_PROCESSED/$split" &
+    
+    wait
+    python build_metadata.py ShapeNet \
+        --output_dir "$SHAPENET_PROCESSED/$split"
+done
+
 
 # we dont train the VAEs again, only the flow matching
 # so encode anyway to save time
