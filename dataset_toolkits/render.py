@@ -74,12 +74,12 @@ if __name__ == '__main__':
     parser.add_argument('--num_views', type=int, default=150,
                         help='Number of views to render')
     parser.add_argument('--engine', type=str, default='CYCLES',
-                        help='Blender render engine to use')
+                        help='Blender render engine to use (CYCLES, BLENDER_EEVEE, BLENDER_WORKBENCH)')
     parser.add_argument('--resolution', type=int, default=512,
                         help='Render resolution for each image')
     parser.add_argument('--samples', type=int, default=128,
                         help='Cycles sample count when using Cycles engine')
-    parser.add_argument('--denoise', action='store_true',
+    parser.add_argument('--denoise', action='store_true', default=True,
                         help='Enable Cycles denoising')
     dataset_utils.add_args(parser)
     parser.add_argument('--rank', type=int, default=0)

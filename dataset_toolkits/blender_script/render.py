@@ -78,6 +78,17 @@ def init_render(engine='CYCLES', resolution=512, geo_mode=False, samples=128, de
         bpy.context.scene.cycles.transparent_max_bounces = 3 if not geo_mode else 0
         bpy.context.scene.cycles.transmission_bounces = 3 if not geo_mode else 1
         bpy.context.scene.cycles.use_denoising = denoise
+        scene = bpy.context.scene
+        scene.cycles.max_bounces = 1
+        scene.cycles.diffuse_bounces = 1
+        scene.cycles.glossy_bounces = 0
+        scene.cycles.transmission_bounces = 0
+        scene.cycles.transparent_max_bounces = 0
+        scene.cycles.volume_bounces = 0
+        scene.cycles.caustics_reflective = False
+        scene.cycles.caustics_refractive = False
+        scene.cycles.use_adaptive_sampling = True
+        scene.cycles.adaptive_threshold = 0.1
     elif engine == 'BLENDER_EEVEE':
         bpy.context.scene.eevee.taa_samples = 1
         bpy.context.scene.eevee.taa_render_samples = 1
@@ -89,6 +100,15 @@ def init_render(engine='CYCLES', resolution=512, geo_mode=False, samples=128, de
         bpy.context.scene.eevee.use_motion_blur = False
         bpy.context.scene.eevee.use_volumetric_lights = False
         bpy.context.scene.eevee.use_volumetric_shadows = False
+    elif engine == 'BLENDER_WORKBENCH':
+        # Workbench uses viewport-style shading settings.
+        # Keep settings deterministic and relatively high quality while fast.
+        scene = bpy.context.scene
+        scene.display.render_aa = 'FXAA'
+        scene.display.shading.light = 'STUDIO'
+        scene.display.shading.color_type = 'TEXTURE'
+        scene.display.shading.show_backface_culling = False
+        scene.display.shading.show_cavity = False
 
     # keep low-noise rendering for geometry outputs if geo_mode is enabled
     if geo_mode and engine == 'CYCLES':
@@ -552,7 +572,7 @@ if __name__ == '__main__':
     parser.add_argument('--object', type=str, help='Path to the 3D model file to be rendered.')
     parser.add_argument('--output_folder', type=str, default='/tmp', help='The path the output will be dumped to.')
     parser.add_argument('--resolution', type=int, default=512, help='Resolution of the images.')
-    parser.add_argument('--engine', type=str, default='CYCLES', help='Blender internal engine for rendering. E.g. CYCLES, BLENDER_EEVEE, ...')
+    parser.add_argument('--engine', type=str, default='CYCLES', help='Blender internal engine for rendering. E.g. CYCLES, BLENDER_EEVEE, BLENDER_WORKBENCH')
     parser.add_argument('--samples', type=int, default=128, help='Cycles sample count when using Cycles engine.')
     parser.add_argument('--denoise', action='store_true', help='Enable Cycles denoising.')
     parser.add_argument('--geo_mode', action='store_true', help='Geometry mode for rendering.')

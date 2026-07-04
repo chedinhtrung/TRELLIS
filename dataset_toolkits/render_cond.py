@@ -79,7 +79,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_views', type=int, default=24,
                         help='Number of views to render')
     parser.add_argument('--engine', type=str, default='CYCLES',
-                        help='Blender render engine to use')
+                        help='Blender render engine to use (CYCLES, BLENDER_EEVEE, BLENDER_WORKBENCH)')
     parser.add_argument('--resolution', type=int, default=1024,
                         help='Render resolution for each image')
     parser.add_argument('--samples', type=int, default=128,

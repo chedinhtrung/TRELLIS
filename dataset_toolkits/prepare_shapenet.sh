@@ -17,21 +17,21 @@ echo "[stage1] Rendering images"
 for split in train val test; do
     echo "[stage1] Rendering $split split"
 
-    python render.py ShapeNet \
+    python render_kiui.py ShapeNet \
         --output_dir "$SHAPENET_PROCESSED/$split" \
-        --num_views 4 \
-        --engine BLENDER_EEVEE \
-        --resolution 256 \
-        --samples 1 \
-        --max_workers 1 &
+        --num_views 30 \
+        --engine BLENDER_WORKBENCH \
+        --resolution 280 \
+        --samples 16 \
+        --max_workers 6 \
 
-    python render_cond.py ShapeNet \
+    python render_cond_kiui.py ShapeNet \
         --output_dir "$SHAPENET_PROCESSED/$split" \
-        --num_views 1 \
-        --engine BLENDER_EEVEE \
-        --resolution 256 \
-        --samples 1 \
-        --max_workers 1 &
+        --num_views 30 \
+        --engine BLENDER_WORKBENCH \
+        --resolution 280 \
+        --samples 16 \
+        --max_workers 6 &
 
     wait
 
