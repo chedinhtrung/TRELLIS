@@ -21,7 +21,7 @@ from kiui.mesh import Mesh
 from kiui.cam import look_at, get_perspective
 
 
-def _count_map_kd_in_obj(file_path: str) -> int:
+def _count_kd_maps(file_path: str) -> int:
     if not file_path.lower().endswith('.obj'):
         return 0
     if not os.path.exists(file_path):
@@ -48,12 +48,12 @@ def _count_map_kd_in_obj(file_path: str) -> int:
     return count
 
 
-def _load_mesh_with_low_change_multimat_fix(file_path: str) -> Mesh:
-    map_kd_count = _count_map_kd_in_obj(file_path)
-    if map_kd_count <= 1:
+def _load_mesh_compat(file_path: str) -> Mesh:
+    kd_maps = _count_kd_maps(file_path)
+    if kd_maps <= 1:
         return Mesh.load(file_path, resize=False, renormal=True)
 
-    print(f"[INFO] multi-material OBJ detected ({map_kd_count} map_Kd), baking to vertex colors: {file_path}", flush=True)
+    print(f"[INFO] multi-material OBJ detected ({kd_maps} map_Kd), baking to vertex colors: {file_path}", flush=True)
     data = trimesh.load(file_path, process=False)
     tm = data.to_mesh() if isinstance(data, trimesh.Scene) else data
 
@@ -124,8 +124,6 @@ def _render_views(
     views,
     resolution: int,
     ssaa: float = 1.0,
-    shading_mode: str = 'lambertian',
-    ambient_ratio: float = 0.5,
 ):
     device = mesh.v.device
     f = mesh.f.int()
@@ -172,33 +170,12 @@ def _render_views(
     else:
         albedo = None
 
-    # per-pixel normal for shape cues
-    normal = None
-    if mesh.vn is not None and mesh.fn is not None:
-        vn = mesh.vn.unsqueeze(0).expand(len(views), -1, -1).contiguous()
-        normal, _ = dr.interpolate(vn, rast, mesh.fn.int())
-        normal = F.normalize(normal, dim=-1, eps=1e-6)
-        normal = torch.where(rast[..., 3:] > 0, normal, torch.zeros_like(normal))
+    if albedo is None:
+        # fixed fast fallback when texture/vertex color is unavailable
+        albedo = torch.ones((len(views), render_resolution, render_resolution, 3), device=device, dtype=torch.float32) * 0.7
+        albedo = torch.where(rast[..., 3:] > 0, albedo, torch.zeros_like(albedo))
 
-    if shading_mode == 'normal' and normal is not None:
-        rgb = (normal + 1.0) * 0.5
-    else:
-        if albedo is None:
-            if normal is not None:
-                # no texture/color available -> still keep strong 3D shape cue
-                albedo = (normal + 1.0) * 0.5
-            else:
-                albedo = torch.ones((len(views), render_resolution, render_resolution, 3), device=device, dtype=torch.float32) * 0.7
-                albedo = torch.where(rast[..., 3:] > 0, albedo, torch.zeros_like(albedo))
-
-        if shading_mode == 'lambertian' and normal is not None:
-            light_d = torch.tensor([0.5, 1.0, 0.8], device=device, dtype=torch.float32)
-            light_d = F.normalize(light_d, dim=0, eps=1e-6)
-            lambert = (normal * light_d.view(1, 1, 1, 3)).sum(dim=-1, keepdim=True).clamp(min=0)
-            lambert = ambient_ratio + (1.0 - ambient_ratio) * lambert
-            rgb = albedo * lambert
-        else:
-            rgb = albedo
+    rgb = albedo
 
     rgb = torch.where(rast[..., 3:] > 0, rgb, torch.zeros_like(rgb))
 
@@ -214,21 +191,21 @@ def _render_views(
     return rgba, poses
 
 
-def _render_cond(file_path, sha256, output_dir, num_views, engine, resolution, samples, denoise, ssaa, shading_mode, ambient_ratio):
+def _render_cond(file_path, sha256, output_dir, num_views, resolution, denoise, ssaa):
     output_folder = os.path.join(output_dir, "renders_cond", sha256)
     os.makedirs(output_folder, exist_ok=True)
 
     if os.path.exists(os.path.join(output_folder, "transforms.json")):
         return {"sha256": sha256, "cond_rendered": True}
 
-    mesh = _load_mesh_with_low_change_multimat_fix(file_path)
+    mesh = _load_mesh_compat(file_path)
     scale, offset = _normalize_mesh_blender_style(mesh)
 
     # keep mesh saving (very important)
     mesh.write(os.path.join(output_folder, "mesh.ply"))
 
     views = _build_cond_views(num_views)
-    rgba, poses = _render_views(mesh, views, resolution, ssaa=ssaa, shading_mode=shading_mode, ambient_ratio=ambient_ratio)
+    rgba, poses = _render_views(mesh, views, resolution, ssaa=ssaa)
 
     imgs = (rgba.detach().cpu().numpy() * 255).astype(np.uint8)
     for i in range(num_views):
@@ -264,13 +241,9 @@ if __name__ == "__main__":
     parser.add_argument("--filter_low_aesthetic_score", type=float, default=None, help="Filter objects with aesthetic score lower than this value")
     parser.add_argument("--instances", type=str, default=None, help="Instances to process")
     parser.add_argument("--num_views", type=int, default=24, help="Number of views to render")
-    parser.add_argument("--engine", type=str, default="CYCLES", help="Kept for CLI compatibility")
     parser.add_argument("--resolution", type=int, default=1024, help="Render resolution for each image")
-    parser.add_argument("--samples", type=int, default=128, help="Kept for CLI compatibility")
     parser.add_argument("--denoise", action="store_true", help="Kept for CLI compatibility")
-    parser.add_argument("--ssaa", type=float, default=2.0, help="Super-sampling anti-aliasing ratio for higher quality")
-    parser.add_argument("--shading_mode", type=str, default="lambertian", choices=["lambertian", "albedo", "normal"], help="Shading mode for kiui renderer")
-    parser.add_argument("--ambient_ratio", type=float, default=0.5, help="Ambient light ratio for lambertian shading")
+    parser.add_argument("--ssaa", type=float, default=1.5, help="Super-sampling anti-aliasing ratio for higher quality")
     dataset_utils.add_args(parser)
     parser.add_argument("--rank", type=int, default=0)
     parser.add_argument("--world_size", type=int, default=1)
@@ -313,13 +286,9 @@ if __name__ == "__main__":
         _render_cond,
         output_dir=opt.output_dir,
         num_views=opt.num_views,
-        engine=opt.engine,
         resolution=opt.resolution,
-        samples=opt.samples,
         denoise=opt.denoise,
         ssaa=opt.ssaa,
-        shading_mode=opt.shading_mode,
-        ambient_ratio=opt.ambient_ratio,
     )
     cond_rendered = dataset_utils.foreach_instance(metadata, opt.output_dir, func, max_workers=opt.max_workers, desc="Rendering objects")
     cond_rendered = pd.concat([cond_rendered, pd.DataFrame.from_records(records)])

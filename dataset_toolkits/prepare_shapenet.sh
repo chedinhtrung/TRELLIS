@@ -19,19 +19,15 @@ for split in train val test; do
 
     python render_kiui.py ShapeNet \
         --output_dir "$SHAPENET_PROCESSED/$split" \
-        --num_views 30 \
-        --engine BLENDER_WORKBENCH \
-        --resolution 280 \
-        --samples 16 \
-        --max_workers 6 \
+        --num_views 60 \
+        --resolution 338 \
+        --max_workers 1 & \
 
     python render_cond_kiui.py ShapeNet \
         --output_dir "$SHAPENET_PROCESSED/$split" \
-        --num_views 30 \
-        --engine BLENDER_WORKBENCH \
-        --resolution 280 \
-        --samples 16 \
-        --max_workers 6 &
+        --num_views 60 \
+        --resolution 338 \
+        --max_workers 1 & 
 
     wait
 
