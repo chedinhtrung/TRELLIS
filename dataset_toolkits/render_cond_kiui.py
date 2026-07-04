@@ -4,7 +4,11 @@ import copy
 import sys
 import importlib
 import argparse
+import shutil
+import traceback
+import threading
 from functools import partial
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -19,6 +23,28 @@ from utils import sphere_hammersley_sequence
 import nvdiffrast.torch as dr
 from kiui.mesh import Mesh
 from kiui.cam import look_at, get_perspective
+
+
+_LOG_LOCK = threading.Lock()
+
+
+def _log(log_file: str, level: str, sha256: str, message: str):
+    ts = datetime.now().isoformat(timespec='seconds')
+    line = f"[{ts}] [{level}] [{sha256}] {message}\n"
+    with _LOG_LOCK:
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(line)
+
+
+def _is_complete_output(output_folder: str, num_views: int) -> bool:
+    if not os.path.isdir(output_folder):
+        return False
+    if not os.path.exists(os.path.join(output_folder, 'mesh.ply')):
+        return False
+    if not os.path.exists(os.path.join(output_folder, 'transforms.json')):
+        return False
+    png_count = len([x for x in os.listdir(output_folder) if x.lower().endswith('.png') and x[:3].isdigit()])
+    return png_count == num_views
 
 
 def _count_kd_maps(file_path: str) -> int:
@@ -48,17 +74,17 @@ def _count_kd_maps(file_path: str) -> int:
     return count
 
 
-def _load_mesh_compat(file_path: str) -> Mesh:
+def _load_mesh_compat(file_path: str, log_file: str, sha256: str) -> Mesh:
     kd_maps = _count_kd_maps(file_path)
     if kd_maps <= 1:
         return Mesh.load(file_path, resize=False, renormal=True)
 
-    print(f"[INFO] multi-material OBJ detected ({kd_maps} map_Kd), baking to vertex colors: {file_path}", flush=True)
+    _log(log_file, 'WARN', sha256, f"multi-material OBJ detected ({kd_maps} map_Kd), baking to vertex colors: {file_path}")
     data = trimesh.load(file_path, process=False)
     tm = data.to_mesh() if isinstance(data, trimesh.Scene) else data
 
     if tm is None or len(tm.vertices) == 0 or len(tm.faces) == 0:
-        print('[WARN] trimesh bake failed, falling back to Mesh.load()', flush=True)
+        _log(log_file, 'WARN', sha256, 'trimesh bake failed, falling back to Mesh.load()')
         return Mesh.load(file_path, resize=False, renormal=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -75,7 +101,7 @@ def _load_mesh_compat(file_path: str) -> Mesh:
             vc = np.asarray(vc)[..., :3].astype(np.float32) / 255.0
             mesh.vc = torch.tensor(vc, dtype=torch.float32, device=device)
     except Exception as e:
-        print(f'[WARN] vertex color bake failed: {e}', flush=True)
+        _log(log_file, 'WARN', sha256, f'vertex color bake failed: {e}')
 
     mesh.auto_normal()
     return mesh
@@ -191,46 +217,64 @@ def _render_views(
     return rgba, poses
 
 
-def _render_cond(file_path, sha256, output_dir, num_views, resolution, denoise, ssaa):
-    output_folder = os.path.join(output_dir, "renders_cond", sha256)
-    os.makedirs(output_folder, exist_ok=True)
+def _render_cond(file_path, sha256, output_dir, num_views, resolution, denoise, ssaa, log_file):
+    final_folder = os.path.join(output_dir, 'renders_cond', sha256)
+    tmp_folder = final_folder + '.tmp'
 
-    if os.path.exists(os.path.join(output_folder, "transforms.json")):
-        return {"sha256": sha256, "cond_rendered": True}
+    try:
+        if _is_complete_output(final_folder, num_views):
+            return {'sha256': sha256, 'cond_rendered': True}
 
-    mesh = _load_mesh_compat(file_path)
-    scale, offset = _normalize_mesh_blender_style(mesh)
+        if os.path.exists(final_folder):
+            _log(log_file, 'WARN', sha256, 'incomplete existing output found, deleting and rebuilding')
+            shutil.rmtree(final_folder, ignore_errors=True)
+        if os.path.exists(tmp_folder):
+            shutil.rmtree(tmp_folder, ignore_errors=True)
+        os.makedirs(tmp_folder, exist_ok=True)
 
-    # keep mesh saving (very important)
-    mesh.write(os.path.join(output_folder, "mesh.ply"))
+        mesh = _load_mesh_compat(file_path, log_file=log_file, sha256=sha256)
+        scale, offset = _normalize_mesh_blender_style(mesh)
 
-    views = _build_cond_views(num_views)
-    rgba, poses = _render_views(mesh, views, resolution, ssaa=ssaa)
+        views = _build_cond_views(num_views)
+        rgba, poses = _render_views(mesh, views, resolution, ssaa=ssaa)
 
-    imgs = (rgba.detach().cpu().numpy() * 255).astype(np.uint8)
-    for i in range(num_views):
-        Image.fromarray(imgs[i], mode="RGBA").save(os.path.join(output_folder, f"{i:03d}.png"))
+        imgs = (rgba.detach().cpu().numpy() * 255).astype(np.uint8)
+        for i in range(num_views):
+            Image.fromarray(imgs[i], mode='RGBA').save(os.path.join(tmp_folder, f'{i:03d}.png'))
 
-    to_export = {
-        "aabb": [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-        "scale": scale,
-        "offset": offset,
-        "frames": [],
-    }
-    poses_np = poses.detach().cpu().numpy()
-    for i, v in enumerate(views):
-        to_export["frames"].append(
-            {
-                "file_path": f"{i:03d}.png",
-                "camera_angle_x": float(v["fov"]),
-                "transform_matrix": poses_np[i].tolist(),
-            }
-        )
+        # keep mesh saving (very important)
+        mesh.write(os.path.join(tmp_folder, 'mesh.ply'))
 
-    with open(os.path.join(output_folder, "transforms.json"), "w") as f:
-        json.dump(to_export, f, indent=4)
+        to_export = {
+            'aabb': [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+            'scale': scale,
+            'offset': offset,
+            'frames': [],
+        }
+        poses_np = poses.detach().cpu().numpy()
+        for i, v in enumerate(views):
+            to_export['frames'].append(
+                {
+                    'file_path': f'{i:03d}.png',
+                    'camera_angle_x': float(v['fov']),
+                    'transform_matrix': poses_np[i].tolist(),
+                }
+            )
 
-    return {"sha256": sha256, "cond_rendered": True}
+        with open(os.path.join(tmp_folder, 'transforms.json'), 'w') as f:
+            json.dump(to_export, f, indent=4)
+
+        if not _is_complete_output(tmp_folder, num_views):
+            _log(log_file, 'ERROR', sha256, 'output validation failed (missing png/mesh/transforms)')
+            shutil.rmtree(tmp_folder, ignore_errors=True)
+            return None
+
+        os.replace(tmp_folder, final_folder)
+        return {'sha256': sha256, 'cond_rendered': True}
+    except Exception as e:
+        _log(log_file, 'ERROR', sha256, f'{e} | traceback: {traceback.format_exc().strip()}')
+        shutil.rmtree(tmp_folder, ignore_errors=True)
+        return None
 
 
 if __name__ == "__main__":
@@ -250,6 +294,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_workers", type=int, default=8)
     opt = parser.parse_args(sys.argv[2:])
     opt = edict(vars(opt))
+    log_file = os.path.join(opt.output_dir, f'error_render_cond_{opt.rank}.log')
 
     os.makedirs(os.path.join(opt.output_dir, "renders_cond"), exist_ok=True)
 
@@ -276,7 +321,7 @@ if __name__ == "__main__":
     records = []
 
     for sha256 in copy.copy(metadata["sha256"].values):
-        if os.path.exists(os.path.join(opt.output_dir, "renders_cond", sha256, "transforms.json")):
+        if _is_complete_output(os.path.join(opt.output_dir, 'renders_cond', sha256), opt.num_views):
             records.append({"sha256": sha256, "cond_rendered": True})
             metadata = metadata[metadata["sha256"] != sha256]
 
@@ -289,6 +334,7 @@ if __name__ == "__main__":
         resolution=opt.resolution,
         denoise=opt.denoise,
         ssaa=opt.ssaa,
+        log_file=log_file,
     )
     cond_rendered = dataset_utils.foreach_instance(metadata, opt.output_dir, func, max_workers=opt.max_workers, desc="Rendering objects")
     cond_rendered = pd.concat([cond_rendered, pd.DataFrame.from_records(records)])
