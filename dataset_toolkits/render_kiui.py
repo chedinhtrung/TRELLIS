@@ -184,7 +184,7 @@ def _render_views(
         texc, texc_db = dr.interpolate(vt, rast, mesh.ft.int(), rast_db=rast_db, diff_attrs='all')
         #texc[..., 1] = 1.0 - texc[..., 1]
         albedo = mesh.albedo.unsqueeze(0).expand(len(views), -1, -1, -1).contiguous()
-        albedo = dr.texture(albedo, texc, uv_da=texc_db, filter_mode="linear-mipmap-linear", max_mip_level=8)
+        albedo = dr.texture(albedo, texc, filter_mode="linear")
         albedo = torch.where(rast[..., 3:] > 0, albedo, torch.zeros_like(albedo))
     else:
         albedo = None
@@ -210,13 +210,17 @@ def _render_views(
     return rgba, poses
 
 
-def _render(file_path, sha256, output_dir, num_views, resolution, denoise, ssaa, log_file):
+def _render(file_path, sha256, output_dir, num_views, resolution, denoise, ssaa, log_file, override=False):
     final_folder = os.path.join(output_dir, 'renders', sha256)
     tmp_folder = final_folder + '.tmp'
 
     try:
-        if _is_complete_output(final_folder, num_views):
+        if not override and _is_complete_output(final_folder, num_views):
             return {'sha256': sha256, 'rendered': True}
+
+        if override and os.path.exists(final_folder):
+            _log(log_file, 'INFO', sha256, 'override enabled, deleting existing output and re-rendering')
+            shutil.rmtree(final_folder, ignore_errors=True)
 
         if os.path.exists(final_folder):
             _log(log_file, 'WARN', sha256, 'incomplete existing output found, deleting and rebuilding')
@@ -281,6 +285,7 @@ if __name__ == "__main__":
     parser.add_argument("--resolution", type=int, default=512, help="Render resolution for each image")
     parser.add_argument("--denoise", action="store_true", default=True, help="Kept for CLI compatibility")
     parser.add_argument("--ssaa", type=float, default=1.5, help="Super-sampling anti-aliasing ratio for higher quality")
+    parser.add_argument("--override", action="store_true", help="Force re-render by deleting existing outputs")
     dataset_utils.add_args(parser)
     parser.add_argument("--rank", type=int, default=0)
     parser.add_argument("--world_size", type=int, default=1)
@@ -298,7 +303,7 @@ if __name__ == "__main__":
         metadata = metadata[metadata["local_path"].notna()]
         if opt.filter_low_aesthetic_score is not None:
             metadata = metadata[metadata["aesthetic_score"] >= opt.filter_low_aesthetic_score]
-        if "rendered" in metadata.columns:
+        if not opt.override and "rendered" in metadata.columns:
             metadata = metadata[metadata["rendered"] == False]
     else:
         if os.path.exists(opt.instances):
@@ -313,10 +318,11 @@ if __name__ == "__main__":
     metadata = metadata[start:end]
     records = []
 
-    for sha256 in copy.copy(metadata["sha256"].values):
-        if _is_complete_output(os.path.join(opt.output_dir, 'renders', sha256), opt.num_views):
-            records.append({"sha256": sha256, "rendered": True})
-            metadata = metadata[metadata["sha256"] != sha256]
+    if not opt.override:
+        for sha256 in copy.copy(metadata["sha256"].values):
+            if _is_complete_output(os.path.join(opt.output_dir, 'renders', sha256), opt.num_views):
+                records.append({"sha256": sha256, "rendered": True})
+                metadata = metadata[metadata["sha256"] != sha256]
 
     print(f"Processing {len(metadata)} objects...")
 
@@ -328,6 +334,7 @@ if __name__ == "__main__":
         denoise=opt.denoise,
         ssaa=opt.ssaa,
         log_file=log_file,
+        override=opt.override,
     )
     rendered = dataset_utils.foreach_instance(metadata, opt.output_dir, func, max_workers=opt.max_workers, desc="Rendering objects")
     rendered = pd.concat([rendered, pd.DataFrame.from_records(records)])
