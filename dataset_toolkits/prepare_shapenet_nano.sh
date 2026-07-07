@@ -12,22 +12,22 @@ python shapenet/shapenet_to_trellis_raw.py \
     --shapenet-root "$REPO_ROOT/datasets/ShapeNet" \
     --categories car bus file_cabinet cabinet \
     --outdir "$SHAPENET_PROCESSED" \
-    --limit 12
+    --limit 5
 
 echo "[stage1] Rendering images"
-for split in train val test; do
+for split in train; do  ## only train set
     echo "[stage1] Rendering $split split"
 
     python render_kiui.py ShapeNet \
         --output_dir "$SHAPENET_PROCESSED/$split" \
         --num_views 40 \
-        --resolution 338 \
+        --resolution 512 \
         --max_workers 1 & \
 
     python render_cond_kiui.py ShapeNet \
         --output_dir "$SHAPENET_PROCESSED/$split" \
         --num_views 40 \
-        --resolution 338 \
+        --resolution 512 \
         --max_workers 1 & 
 
     wait

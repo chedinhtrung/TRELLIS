@@ -75,11 +75,11 @@ def _count_kd_maps(file_path: str) -> int:
 
 
 def _load_mesh_compat(file_path: str, log_file: str, sha256: str) -> Mesh:
-    kd_maps = _count_kd_maps(file_path)
-    if kd_maps <= 1:
-        return Mesh.load(file_path, resize=False, renormal=True)
+    #kd_maps = _count_kd_maps(file_path)
+    #if kd_maps <= 1:
+    #    return Mesh.load(file_path, resize=False, renormal=True)
 
-    _log(log_file, 'WARN', sha256, f"multi-material OBJ detected ({kd_maps} map_Kd), baking to vertex colors: {file_path}")
+    #_log(log_file, 'WARN', sha256, f"multi-material OBJ detected ({kd_maps} map_Kd), baking to vertex colors: {file_path}")
     data = trimesh.load(file_path, process=False)
     tm = data.to_mesh() if isinstance(data, trimesh.Scene) else data
 
@@ -212,6 +212,33 @@ def _render_views(
 
     return rgba, poses
 
+### These are for rotating the mesh 90 degrees to match Blender's ENU
+def _clone_mesh_for_export(mesh: Mesh) -> Mesh:
+    cloned = Mesh(
+        v=mesh.v.clone(),
+        f=mesh.f.clone(),
+        device=mesh.v.device,
+    )
+    if mesh.vc is not None:
+        cloned.vc = mesh.vc.clone()
+    if mesh.vn is not None:
+        cloned.vn = mesh.vn.clone()
+    if mesh.vt is not None:
+        cloned.vt = mesh.vt.clone()
+    if mesh.ft is not None:
+        cloned.ft = mesh.ft.clone()
+    if mesh.albedo is not None:
+        cloned.albedo = mesh.albedo.clone()
+    return cloned
+
+
+def _rotate_mesh_pos90_x_inplace(mesh: Mesh):
+    x = mesh.v[:, 0]
+    y = mesh.v[:, 1]
+    z = mesh.v[:, 2]
+    # +90 deg around X (right-handed): y'=-z, z'=y
+    mesh.v = torch.stack([x, -z, y], dim=-1)
+## end of rotation helpers
 
 def _render(file_path, sha256, output_dir, num_views, resolution, denoise, ssaa, log_file, override=False):
     final_folder = os.path.join(output_dir, 'renders', sha256)
@@ -243,7 +270,12 @@ def _render(file_path, sha256, output_dir, num_views, resolution, denoise, ssaa,
             Image.fromarray(imgs[i], mode='RGBA').save(os.path.join(tmp_folder, f'{i:03d}.png'))
 
         # keep mesh saving (very important)
-        mesh.write(os.path.join(tmp_folder, 'mesh.ply'))
+        mesh_to_export = _clone_mesh_for_export(mesh)
+        
+        # very hard to explain, but we have to rotate the mesh 90 degs before saving 
+        # to match blender. BUT camera matrix stays the same
+        _rotate_mesh_pos90_x_inplace(mesh_to_export)
+        mesh_to_export.write(os.path.join(tmp_folder, 'mesh.ply'))
 
         to_export = {
             'aabb': [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
@@ -287,7 +319,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_views", type=int, default=150, help="Number of views to render")
     parser.add_argument("--resolution", type=int, default=512, help="Render resolution for each image")
     parser.add_argument("--denoise", action="store_true", default=True, help="Kept for CLI compatibility")
-    parser.add_argument("--ssaa", type=float, default=1.5, help="Super-sampling anti-aliasing ratio for higher quality")
+    parser.add_argument("--ssaa", type=float, default=2.0, help="Super-sampling anti-aliasing ratio for higher quality")
     parser.add_argument("--override", action="store_true", help="Force re-render by deleting existing outputs")
     dataset_utils.add_args(parser)
     parser.add_argument("--rank", type=int, default=0)

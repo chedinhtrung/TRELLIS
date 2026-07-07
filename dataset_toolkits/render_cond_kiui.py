@@ -75,11 +75,11 @@ def _count_kd_maps(file_path: str) -> int:
 
 
 def _load_mesh_compat(file_path: str, log_file: str, sha256: str) -> Mesh:
-    kd_maps = _count_kd_maps(file_path)
-    if kd_maps <= 1:
-        return Mesh.load(file_path, resize=False, renormal=True)
+    #kd_maps = _count_kd_maps(file_path)
+    #if kd_maps <= 1:
+    #    return Mesh.load(file_path, resize=False, renormal=True)
 
-    _log(log_file, 'WARN', sha256, f"multi-material OBJ detected ({kd_maps} map_Kd), baking to vertex colors: {file_path}")
+    #_log(log_file, 'WARN', sha256, f"multi-material OBJ detected ({kd_maps} map_Kd), baking to vertex colors: {file_path}")
     data = trimesh.load(file_path, process=False)
     tm = data.to_mesh() if isinstance(data, trimesh.Scene) else data
 
