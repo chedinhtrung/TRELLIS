@@ -54,20 +54,18 @@ def mesh_to_voxel_points(mesh, resolution: int) -> np.ndarray:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export full TRELLIS mesh outputs as voxelized PLYs.")
-    parser.add_argument("--mode", choices=["base", "lora"], required=True)
     parser.add_argument("--dataset-dir", type=Path, default=REPO_ROOT / "datasets/ShapeNetInternals_small")
-    parser.add_argument("--pred-root", type=Path, default=REPO_ROOT / "results/shapenet_internals_lora/predictions")
+    parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "results/shapenet_internals_lora/predictions/full_pipeline")
     parser.add_argument("--pipeline", default="microsoft/TRELLIS-image-large")
-    parser.add_argument("--ss-lora-ckpt", type=Path, default=REPO_ROOT / "results/shapenet_internals_lora/ss_flow/ckpts/denoiser_lora_step0002000.pt")
-    parser.add_argument("--slat-lora-ckpt", type=Path, default=REPO_ROOT / "results/shapenet_internals_lora/slat_flow/ckpts/denoiser_lora_step0002000.pt")
+    parser.add_argument("--ss-lora-ckpt", type=Path, default=None, help="Optional LoRA checkpoint for sparse_structure_flow_model")
+    parser.add_argument("--slat-lora-ckpt", type=Path, default=None, help="Optional LoRA checkpoint for slat_flow_model")
     parser.add_argument("--resolution", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--skip-existing", action="store_true")
     args = parser.parse_args()
 
-    method_dir = args.pred_root / ("base_ss_slat_voxelized" if args.mode == "base" else "lora_ss_slat_voxelized")
+    method_dir = args.output_dir
     mesh_dir = method_dir / "mesh"
     voxel_dir = method_dir / "voxels"
     mesh_dir.mkdir(parents=True, exist_ok=True)
@@ -79,14 +77,21 @@ def main() -> None:
 
     from trellis.pipelines import TrellisImageTo3DPipeline
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pipeline = TrellisImageTo3DPipeline.from_pretrained(args.pipeline)
-    pipeline.to(torch.device(args.device))
+    pipeline.to(device)
 
-    if args.mode == "lora":
+    use_lora = args.ss_lora_ckpt is not None and args.slat_lora_ckpt is not None
+    if use_lora:
+        print(f"Running with LoRA checkpoints: ss={args.ss_lora_ckpt}, slat={args.slat_lora_ckpt}")
         load_lora(pipeline.models["sparse_structure_flow_model"], args.ss_lora_ckpt)
         load_lora(pipeline.models["slat_flow_model"], args.slat_lora_ckpt)
+    elif args.ss_lora_ckpt is None and args.slat_lora_ckpt is None:
+        print("Running base model (no LoRA checkpoints provided)")
+    else:
+        raise ValueError("Provide both --ss-lora-ckpt and --slat-lora-ckpt, or neither")
 
-    for sample_id in tqdm(ids, desc=f"Exporting {args.mode} full-pipeline voxels"):
+    for sample_id in tqdm(ids, desc="Exporting full-pipeline voxels"):
         mesh_out_path = mesh_dir / f"{sample_id}.ply"
         voxel_out_path = voxel_dir / f"{sample_id}.ply"
         if args.skip_existing and voxel_out_path.exists():

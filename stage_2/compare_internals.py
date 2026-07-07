@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 
 import numpy as np
+import utils3d
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -17,74 +18,10 @@ METHODS = [
 ]
 
 
-PLY_DTYPES = {
-    "char": "i1",
-    "uchar": "u1",
-    "short": "i2",
-    "ushort": "u2",
-    "int": "i4",
-    "uint": "u4",
-    "float": "f4",
-    "double": "f8",
-    "int8": "i1",
-    "uint8": "u1",
-    "int16": "i2",
-    "uint16": "u2",
-    "int32": "i4",
-    "uint32": "u4",
-    "float32": "f4",
-    "float64": "f8",
-}
-
-
 def read_ply_points(path: Path) -> np.ndarray:
-    with path.open("rb") as f:
-        header = []
-        while True:
-            line = f.readline()
-            if not line:
-                raise ValueError(f"PLY header is incomplete: {path}")
-            text = line.decode("ascii").strip()
-            header.append(text)
-            if text == "end_header":
-                break
-
-        fmt = None
-        vertex_count = None
-        vertex_properties = []
-        current_element = None
-
-        for line in header:
-            parts = line.split()
-            if not parts:
-                continue
-            if parts[:1] == ["format"]:
-                fmt = parts[1]
-            elif parts[:1] == ["element"]:
-                current_element = parts[1]
-                if current_element == "vertex":
-                    vertex_count = int(parts[2])
-            elif parts[:1] == ["property"] and current_element == "vertex":
-                if parts[1] == "list":
-                    raise ValueError(f"List vertex properties are not supported: {path}")
-                vertex_properties.append((parts[2], parts[1]))
-
-        if fmt not in {"ascii", "binary_little_endian", "binary_big_endian"}:
-            raise ValueError(f"Unsupported PLY format {fmt!r}: {path}")
-        if vertex_count is None:
-            raise ValueError(f"PLY file has no vertex element: {path}")
-
-        names = [name for name, _ in vertex_properties]
-        xyz = [names.index(axis) for axis in ("x", "y", "z")]
-
-        if fmt == "ascii":
-            points = np.loadtxt(f, max_rows=vertex_count, usecols=xyz, dtype=np.float32)
-            return np.atleast_2d(points)
-
-        endian = "<" if fmt == "binary_little_endian" else ">"
-        dtype = np.dtype([(name, endian + PLY_DTYPES[prop]) for name, prop in vertex_properties])
-        vertices = np.fromfile(f, dtype=dtype, count=vertex_count)
-        return np.stack([vertices["x"], vertices["y"], vertices["z"]], axis=1).astype(np.float32)
+    points = utils3d.io.read_ply(str(path))[0]
+    points = np.asarray(points, dtype=np.float32)
+    return np.atleast_2d(points)
 
 
 def read_voxels(path: Path, resolution: int) -> set[tuple[int, int, int]]:
@@ -99,10 +36,39 @@ def interior(voxels: set[tuple[int, int, int]], margin: int) -> set[tuple[int, i
         return set()
 
     arr = np.array(list(voxels), dtype=np.int32)
-    lo = arr.min(axis=0) + margin
-    hi = arr.max(axis=0) - margin
-    keep = np.all((arr > lo) & (arr < hi), axis=1)
-    return {tuple(voxel) for voxel in arr[keep].tolist()}
+    surface = set()
+
+    # For fixed (y, z), min/max x are surface voxels.
+    yz_to_x = {}
+    for x, y, z in arr.tolist():
+        yz_to_x.setdefault((y, z), []).append(x)
+    for (y, z), xs in yz_to_x.items():
+        x_min = min(xs)
+        x_max = max(xs)
+        surface.add((x_min, y, z))
+        surface.add((x_max, y, z))
+
+    # For fixed (x, z), min/max y are surface voxels.
+    xz_to_y = {}
+    for x, y, z in arr.tolist():
+        xz_to_y.setdefault((x, z), []).append(y)
+    for (x, z), ys in xz_to_y.items():
+        y_min = min(ys)
+        y_max = max(ys)
+        surface.add((x, y_min, z))
+        surface.add((x, y_max, z))
+
+    # For fixed (x, y), min/max z are surface voxels.
+    xy_to_z = {}
+    for x, y, z in arr.tolist():
+        xy_to_z.setdefault((x, y), []).append(z)
+    for (x, y), zs in xy_to_z.items():
+        z_min = min(zs)
+        z_max = max(zs)
+        surface.add((x, y, z_min))
+        surface.add((x, y, z_max))
+
+    return set(voxels) - surface
 
 
 def score_pair(gt_path: Path, pred_path: Path, resolution: int, interior_margin: int) -> tuple[float, float]:
@@ -118,9 +84,12 @@ def score_pair(gt_path: Path, pred_path: Path, resolution: int, interior_margin:
 
 
 def evaluate_method(gt_voxels: Path, pred_voxels: Path, resolution: int, interior_margin: int) -> dict[str, float | int]:
+    voxel_dir = pred_voxels / "voxels"
+    pred_base_dir = voxel_dir if voxel_dir.is_dir() else pred_voxels
+
     scores = []
     for gt_path in sorted(gt_voxels.glob("*.ply")):
-        pred_path = pred_voxels / gt_path.name
+        pred_path = pred_base_dir / gt_path.name
         if pred_path.is_file():
             scores.append(score_pair(gt_path, pred_path, resolution, interior_margin))
 

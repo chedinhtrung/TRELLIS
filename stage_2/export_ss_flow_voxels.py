@@ -43,11 +43,9 @@ def main() -> None:
     parser.add_argument("--dataset-dir", type=Path, default=REPO_ROOT / "datasets/ShapeNetInternals_small")
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "results/shapenet_internals_predictions/ss_flow_voxels")
     parser.add_argument("--pipeline", default="microsoft/TRELLIS-image-large")
-    parser.add_argument("--lora-ckpt", type=Path, default=REPO_ROOT / "results/shapenet_internals_lora/ss_flow/ckpts/denoiser_lora_step0002000.pt")
-    parser.add_argument("--no-lora", action="store_true", help="Export the base pretrained ss_flow model.")
+    parser.add_argument("--lora-ckpt", type=Path, default=None, help="Optional LoRA checkpoint for sparse_structure_flow_model")
     parser.add_argument("--resolution", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--cfg-strength", type=float, default=None)
     parser.add_argument("--limit", type=int, default=None)
@@ -60,11 +58,15 @@ def main() -> None:
 
     from trellis.pipelines import TrellisImageTo3DPipeline
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pipeline = TrellisImageTo3DPipeline.from_pretrained(args.pipeline)
-    pipeline.to(torch.device(args.device))
+    pipeline.to(device)
 
-    if not args.no_lora:
+    if args.lora_ckpt is not None:
+        print(f"Running with LoRA checkpoint: {args.lora_ckpt}")
         load_ss_lora(pipeline, args.lora_ckpt)
+    else:
+        print("Running base model (no LoRA checkpoint provided)")
 
     sampler_params = {}
     if args.steps is not None:
