@@ -57,6 +57,7 @@ class Trainer:
         i_sample=10000,
         i_save=10000,
         i_ddpcheck=10000,
+        snapshot_num_samples=64,
         sample_at_start=True,
         sample_at_end=True,
         **kwargs
@@ -85,6 +86,7 @@ class Trainer:
         self.i_sample = i_sample
         self.i_save = i_save
         self.i_ddpcheck = i_ddpcheck        
+        self.snapshot_num_samples = snapshot_num_samples
         self.sample_at_start = sample_at_start
         self.sample_at_end = sample_at_end
 
@@ -369,9 +371,9 @@ class Trainer:
                 self.snapshot_dataset()
         if self.sample_at_start:
             if self.step == 0:
-                self.snapshot(suffix='init')
+                self.snapshot(suffix='init', num_samples=self.snapshot_num_samples)
             else: # resume
-                self.snapshot(suffix=f'resume_step{self.step:07d}')
+                self.snapshot(suffix=f'resume_step{self.step:07d}', num_samples=self.snapshot_num_samples)
 
         log = []
         time_last_print = 0.0
@@ -405,7 +407,7 @@ class Trainer:
 
             # Sample images
             if self.i_sample is not None and self.i_sample > 0 and self.step % self.i_sample == 0:
-                self.snapshot()
+                self.snapshot(num_samples=self.snapshot_num_samples)
 
             if self.is_master:
                 log.append((self.step, {}))
@@ -448,7 +450,7 @@ class Trainer:
                     self.save()
 
         if self.is_master and self.sample_at_end:
-            self.snapshot(suffix='final')
+            self.snapshot(suffix='final', num_samples=self.snapshot_num_samples)
         if self.is_master:
             self.writer.close()
             print('Training finished.')

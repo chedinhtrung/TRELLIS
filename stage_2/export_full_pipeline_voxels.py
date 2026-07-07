@@ -67,8 +67,11 @@ def main() -> None:
     parser.add_argument("--skip-existing", action="store_true")
     args = parser.parse_args()
 
-    output_dir = args.pred_root / ("base_ss_slat_voxelized" if args.mode == "base" else "lora_ss_slat_voxelized")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    method_dir = args.pred_root / ("base_ss_slat_voxelized" if args.mode == "base" else "lora_ss_slat_voxelized")
+    mesh_dir = method_dir / "mesh"
+    voxel_dir = method_dir / "voxels"
+    mesh_dir.mkdir(parents=True, exist_ok=True)
+    voxel_dir.mkdir(parents=True, exist_ok=True)
 
     ids = read_ids(args.dataset_dir / "metadata.csv")
     if args.limit is not None:
@@ -84,8 +87,9 @@ def main() -> None:
         load_lora(pipeline.models["slat_flow_model"], args.slat_lora_ckpt)
 
     for sample_id in tqdm(ids, desc=f"Exporting {args.mode} full-pipeline voxels"):
-        out_path = output_dir / f"{sample_id}.ply"
-        if args.skip_existing and out_path.exists():
+        mesh_out_path = mesh_dir / f"{sample_id}.ply"
+        voxel_out_path = voxel_dir / f"{sample_id}.ply"
+        if args.skip_existing and voxel_out_path.exists():
             continue
 
         image_path = args.dataset_dir / "renders_cond" / sample_id / "000.png"
@@ -100,10 +104,12 @@ def main() -> None:
             slat = pipeline.sample_slat(cond, coords)
             mesh = pipeline.decode_slat(slat, formats=["mesh"])["mesh"][0]
 
+        utils3d.io.write_ply(mesh_out_path, mesh.vertices.detach().cpu().numpy(), mesh.faces.detach().cpu().numpy())
         points = mesh_to_voxel_points(mesh, args.resolution)
-        utils3d.io.write_ply(out_path, points)
+        utils3d.io.write_ply(voxel_out_path, points)
 
-    print(f"Wrote voxel PLYs to {output_dir}")
+    print(f"Wrote mesh PLYs to {mesh_dir}")
+    print(f"Wrote voxel PLYs to {voxel_dir}")
 
 
 if __name__ == "__main__":
