@@ -190,6 +190,9 @@ def _render_views(
     elif mesh.albedo is not None and mesh.vt is not None and mesh.ft is not None:
         vt = mesh.vt.unsqueeze(0).expand(len(views), -1, -1).contiguous()
         texc, texc_db = dr.interpolate(vt, rast, mesh.ft.int(), rast_db=rast_db, diff_attrs='all')
+        # Some ShapeNet assets use tiled UVs outside [0, 1]. Wrap to avoid
+        # out-of-domain sampling that can look flat/incorrect.
+        texc = torch.remainder(texc, 1.0)
         albedo = mesh.albedo.unsqueeze(0).expand(len(views), -1, -1, -1).contiguous()
         albedo = dr.texture(albedo, texc, uv_da=texc_db, filter_mode="linear")
         albedo = torch.where(rast[..., 3:] > 0, albedo, torch.zeros_like(albedo))
