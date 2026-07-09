@@ -48,12 +48,15 @@ def _render(file_path, sha256, output_dir, num_views, engine, resolution, sample
         '--output_folder', output_folder,
         '--engine', engine,
         '--samples', str(samples),
+        '--save_mesh'
     ]
     if denoise:
         args.append('--denoise')
     if file_path.endswith('.blend'):
         args.insert(1, file_path)
     
+    #call(args, stdout=DEVNULL, stderr=DEVNULL)
+    print(" ".join(args), flush=True)
     ret = call(args)
     print("Blender return code:", ret, flush=True)
     
