@@ -124,6 +124,7 @@ if __name__ == '__main__':
     parser.add_argument('--ckpt', type=str, default='latest', help='Checkpoint step to resume training, default to latest')
     parser.add_argument('--data_dir', type=str, default='./data/', help='Data directory')
     parser.add_argument('--auto_retry', type=int, default=3, help='Number of retries on error')
+    parser.add_argument('--invisible_weight_scalar', type=float, default=-1.0, help='Sparse SLAT flow loss weight for invisible voxels; <=0 disables weighting')
     ## dubug
     parser.add_argument('--tryrun', action='store_true', help='Try run without training')
     parser.add_argument('--profile', action='store_true', help='Profile training')
@@ -138,6 +139,8 @@ if __name__ == '__main__':
     opt.num_gpus = torch.cuda.device_count() if opt.num_gpus == -1 else opt.num_gpus
     ## Load config
     config = json.load(open(opt.config, 'r'))
+    if opt.invisible_weight_scalar > 0:
+        config.setdefault('trainer', {}).setdefault('args', {})['invisible_weight_scalar'] = opt.invisible_weight_scalar
     ## Combine arguments and config
     cfg = edict()
     cfg.update(opt.__dict__)
