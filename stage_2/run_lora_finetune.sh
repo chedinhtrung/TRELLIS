@@ -6,6 +6,8 @@ source "$REPO_ROOT/stage_2/config.sh"
 
 cd "$REPO_ROOT"
 
+ech o "fine tuning flow models"
+
 python train.py \
     --config configs/finetune/ss_flow_img_shapenet_internals_lora.json \
     --data_dir "$DATA_DIR" \
