@@ -12,5 +12,6 @@ python train.py \
     --config configs/finetune/slat_vae_enc_dec_mesh_shapenet_internals_lora.json \
     --data_dir "$DATA_DIR" \
     --output_dir "$OUT_DIR/slat_vae" \
-    --num_gpus "$NUM_GPUS" \
-    --ckpt none
+    --num_gpus 1 \
+    --ckpt none \
+    --auto_retry 0
