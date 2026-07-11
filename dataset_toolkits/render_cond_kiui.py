@@ -22,7 +22,7 @@ from utils import sphere_hammersley_sequence
 
 import nvdiffrast.torch as dr
 from kiui.mesh import Mesh
-from kiui.cam import look_at, get_perspective
+from kiui.cam import get_perspective
 
 
 _LOG_LOCK = threading.Lock()
@@ -38,8 +38,6 @@ def _log(log_file: str, level: str, sha256: str, message: str):
 
 def _is_complete_output(output_folder: str, num_views: int) -> bool:
     if not os.path.isdir(output_folder):
-        return False
-    if not os.path.exists(os.path.join(output_folder, 'mesh.ply')):
         return False
     if not os.path.exists(os.path.join(output_folder, 'transforms.json')):
         return False
@@ -121,6 +119,49 @@ def _normalize_mesh_blender_style(mesh: Mesh):
     return float(scale), offset.detach().cpu().numpy().tolist()
 
 
+def _rotate_mesh_world_pos90_x_inplace(mesh: Mesh):
+    """Convert mesh from Y-up to Blender-style Z-up world."""
+    x = mesh.v[:, 0]
+    y = mesh.v[:, 1]
+    z = mesh.v[:, 2]
+    # +90 deg around X (right-handed): x'=x, y'=-z, z'=y
+    mesh.v = torch.stack([x, -z, y], dim=-1)
+
+    if mesh.vn is not None:
+        nx = mesh.vn[:, 0]
+        ny = mesh.vn[:, 1]
+        nz = mesh.vn[:, 2]
+        mesh.vn = torch.stack([nx, -nz, ny], dim=-1)
+
+
+def _blender_track_to_cam2world_rotation(campos: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Build cam2world rotation equivalent to Blender TRACK_TO (-Z, UP_Y)."""
+    world_up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    fallback_y = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+
+    forward = target - campos
+    n = np.linalg.norm(forward)
+    if n < 1e-12:
+        raise ValueError('camera position equals target; cannot build view basis')
+    forward = forward / n
+
+    z_cam_world = -forward
+    y_cam_world = world_up - np.dot(world_up, z_cam_world) * z_cam_world
+    y_norm = np.linalg.norm(y_cam_world)
+    if y_norm < 1e-6:
+        y_cam_world = fallback_y - np.dot(fallback_y, z_cam_world) * z_cam_world
+        y_norm = np.linalg.norm(y_cam_world)
+        if y_norm < 1e-6:
+            x_axis = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+            y_cam_world = x_axis - np.dot(x_axis, z_cam_world) * z_cam_world
+            y_norm = np.linalg.norm(y_cam_world)
+    y_cam_world = y_cam_world / y_norm
+
+    x_cam_world = np.cross(y_cam_world, z_cam_world)
+    x_cam_world = x_cam_world / np.linalg.norm(x_cam_world)
+    return np.stack([x_cam_world, y_cam_world, z_cam_world], axis=1).astype(np.float32)
+
+
 def _build_cond_views(num_views):
     yaws = []
     pitchs = []
@@ -165,7 +206,7 @@ def _render_views(
             radius * np.sin(pitch),
         ], dtype=np.float32)
         pose = np.eye(4, dtype=np.float32)
-        pose[:3, :3] = look_at(campos, np.zeros(3, dtype=np.float32), opengl=True)
+        pose[:3, :3] = _blender_track_to_cam2world_rotation(campos, np.zeros(3, dtype=np.float32))
         pose[:3, 3] = campos
         poses.append(pose)
         proj.append(get_perspective(np.rad2deg(fov), aspect=1.0))
@@ -240,6 +281,7 @@ def _render_cond(file_path, sha256, output_dir, num_views, resolution, denoise, 
         os.makedirs(tmp_folder, exist_ok=True)
 
         mesh = _load_mesh_compat(file_path, log_file=log_file, sha256=sha256)
+        _rotate_mesh_world_pos90_x_inplace(mesh)
         scale, offset = _normalize_mesh_blender_style(mesh)
 
         views = _build_cond_views(num_views)
@@ -248,9 +290,6 @@ def _render_cond(file_path, sha256, output_dir, num_views, resolution, denoise, 
         imgs = (rgba.detach().cpu().numpy() * 255).astype(np.uint8)
         for i in range(num_views):
             Image.fromarray(imgs[i], mode='RGBA').save(os.path.join(tmp_folder, f'{i:03d}.png'))
-
-        # keep mesh saving (very important)
-        mesh.write(os.path.join(tmp_folder, 'mesh.ply'))
 
         to_export = {
             'aabb': [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
@@ -272,7 +311,7 @@ def _render_cond(file_path, sha256, output_dir, num_views, resolution, denoise, 
             json.dump(to_export, f, indent=4)
 
         if not _is_complete_output(tmp_folder, num_views):
-            _log(log_file, 'ERROR', sha256, 'output validation failed (missing png/mesh/transforms)')
+            _log(log_file, 'ERROR', sha256, 'output validation failed (missing png/transforms)')
             shutil.rmtree(tmp_folder, ignore_errors=True)
             return None
 

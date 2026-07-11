@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ os.environ.setdefault("SPCONV_ALGO", "native")
 
 import trellis.models as models
 import trellis.modules.sparse as sp
+from trellis.modules.lora import apply_lora
 
 
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "results" / "shapenet_mesh_reconstruction"
@@ -39,10 +41,71 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0, help="Limit number of objects; 0 means all available objects.")
     parser.add_argument("--slat-latent-model", default=SLAT_LATENT_MODEL)
     parser.add_argument("--mesh-decoder", default=DEFAULT_MESH_DECODER)
+    parser.add_argument(
+        "--decoder-lora-dir",
+        type=Path,
+        default=None,
+        help="Optional LoRA run directory containing config.json and ckpts/decoder_lora_step*.pt",
+    )
+    parser.add_argument(
+        "--decoder-lora-step",
+        type=int,
+        default=None,
+        help="Optional LoRA step number. If omitted, latest decoder_lora_step*.pt is used.",
+    )
     parser.add_argument("--mesh-sample-points", type=int, default=50000)
     parser.add_argument("--fscore-threshold", type=float, default=0.01)
     parser.add_argument("--overwrite-meshes", action="store_true")
     return parser.parse_args()
+
+
+def _load_decoder_lora_from_dir(decoder: torch.nn.Module, lora_dir: Path, step: int | None) -> None:
+    """Apply decoder LoRA from a training output directory.
+
+    The directory is expected to contain:
+    - config.json with models.decoder.lora
+    - ckpts/decoder_lora_stepXXXXXXX.pt
+    """
+    config_path = lora_dir / "config.json"
+    ckpt_dir = lora_dir / "ckpts"
+    if not config_path.exists():
+        raise FileNotFoundError(f"LoRA config not found: {config_path}")
+    if not ckpt_dir.exists():
+        raise FileNotFoundError(f"LoRA checkpoint directory not found: {ckpt_dir}")
+
+    with config_path.open("r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    lora_cfg = cfg.get("models", {}).get("decoder", {}).get("lora", None)
+    if lora_cfg is None:
+        raise ValueError(f"No models.decoder.lora entry in {config_path}")
+
+    apply_lora(
+        decoder,
+        rank=lora_cfg.get("rank", 8),
+        alpha=lora_cfg.get("alpha", 8.0),
+        dropout=lora_cfg.get("dropout", 0.0),
+        target_patterns=lora_cfg.get("target_patterns", None),
+    )
+
+    if step is None:
+        ckpts = sorted(ckpt_dir.glob("decoder_lora_step*.pt"))
+        if not ckpts:
+            raise FileNotFoundError(f"No decoder LoRA checkpoints found in {ckpt_dir}")
+        ckpt_path = ckpts[-1]
+    else:
+        ckpt_path = ckpt_dir / f"decoder_lora_step{step:07d}.pt"
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Requested decoder LoRA checkpoint not found: {ckpt_path}")
+
+    state = torch.load(ckpt_path, map_location="cpu")
+    missing, unexpected = decoder.load_state_dict(state, strict=False)
+    missing = [key for key in missing if "lora_" in key]
+    unexpected = [key for key in unexpected if "lora_" in key]
+    if missing or unexpected:
+        raise RuntimeError(
+            f"Decoder LoRA checkpoint mismatch. missing={missing}, unexpected={unexpected}"
+        )
+    print(f"Loaded decoder LoRA from: {ckpt_path}", flush=True)
 
 
 def load_slat(sample_id: str, dataset_dir: Path, latent_model: str, device: torch.device) -> sp.SparseTensor:
@@ -149,6 +212,27 @@ def export_mesh(path: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
     make_mesh(vertices, faces).export(path)
 
 
+def export_slat_occupancy(path: Path, slat: sp.SparseTensor, resolution: int = 64) -> None:
+    """Export SLAT occupancy as a voxel-center point cloud PLY.
+
+    This keeps only occupied coordinates (no latent feature values).
+    """
+    ensure_dir(path.parent)
+    coords = slat.coords.detach().cpu().numpy()
+    if coords.ndim != 2 or coords.shape[1] != 4:
+        raise ValueError(f"Expected SLAT coords with shape [N, 4], got {coords.shape}")
+
+    xyz = coords[:, 1:4].astype(np.int32)
+    if xyz.shape[0] > 0:
+        xyz = np.unique(xyz, axis=0)
+        points = ((xyz.astype(np.float32) + 0.5) / float(resolution)) - 0.5
+    else:
+        points = np.zeros((0, 3), dtype=np.float32)
+
+    cloud = trimesh.points.PointCloud(points)
+    cloud.export(path)
+
+
 def sample_mesh_points(mesh: trimesh.Trimesh, count: int, seed: int) -> np.ndarray:
     """Sample deterministic surface points for mesh-to-mesh metrics."""
     if count <= 0:
@@ -197,7 +281,9 @@ def main() -> None:
     args = parse_args()
     ensure_dir(args.output_dir)
     grid_mesh_dir = args.output_dir / "recon_meshes_grid"
+    slat_occ_dir = args.output_dir / "recon_slat_occupancy"
     ensure_dir(grid_mesh_dir)
+    ensure_dir(slat_occ_dir)
 
     metadata = read_metadata(args.dataset_dir)
     if "voxelized" in metadata.columns:
@@ -221,19 +307,26 @@ def main() -> None:
         raise RuntimeError("TRELLIS pretrained mesh decoder requires CUDA in this script.")
 
     decoder = models.from_pretrained(args.mesh_decoder).eval().to(device)
+    if args.decoder_lora_dir is not None:
+        _load_decoder_lora_from_dir(decoder, args.decoder_lora_dir, args.decoder_lora_step)
 
     rows = []
     for index, row in enumerate(selected):
         sample_id = row["sha256"]
         gt_mesh_path = rendered_mesh_path(args.dataset_dir, sample_id)
         grid_mesh_path = grid_mesh_dir / f"{sample_id}.ply"
+        slat_occ_path = slat_occ_dir / f"{sample_id}.ply"
 
         print(f"[{index + 1}/{len(selected)}] Decoding {sample_id}", flush=True)
+
+        slat = load_slat(sample_id, args.dataset_dir, args.slat_latent_model, device)
+        validate_slat(sample_id, slat)
+        if args.overwrite_meshes or not slat_occ_path.exists():
+            export_slat_occupancy(slat_occ_path, slat, resolution=64)
+
         if grid_mesh_path.exists() and not args.overwrite_meshes:
             pred_mesh = load_mesh(grid_mesh_path)
         else:
-            slat = load_slat(sample_id, args.dataset_dir, args.slat_latent_model, device)
-            validate_slat(sample_id, slat)
             with torch.no_grad():
                 decoded = decoder(slat)[0]
             if not decoded.success:

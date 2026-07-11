@@ -9,9 +9,10 @@ export SPCONV_ALGO="${SPCONV_ALGO:-native}"
 echo "[stage1] Running reconstruction evaluation"
 # run reconstruction evaluation of the sparse structure VAE
 cd "$REPO_ROOT/stage_1"
-python run_reconstruction_eval.py --dataset-dir "$SHAPENET_PROCESSED"
+#python run_reconstruction_eval.py --dataset-dir "$SHAPENET_PROCESSED"
 
 python run_mesh_reconstruction_eval.py --dataset-dir "$SHAPENET_PROCESSED" \
-    --output-dir "$REPO_ROOT/stage_1/mesh_reconstruction_eval" \
+    --output-dir "$REPO_ROOT/results/mesh_reconstruction_eval" \
+    #--decoder-lora-dir "$REPO_ROOT/results/shapenet_internals_lora/slat_vae" 
 
 

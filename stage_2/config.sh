@@ -2,7 +2,7 @@
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/datasets/ShapeNetTRELLIS_nano/val}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/datasets/ShapeNetTRELLIS_nano/train}"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/results/shapenet_internals_lora}"
 NUM_GPUS="${NUM_GPUS:-1}"
 
