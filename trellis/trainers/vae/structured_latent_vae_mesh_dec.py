@@ -60,6 +60,7 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
         lambda_lpips: float = 0.2,
         lambda_tsdf: float = 0.01,
         lambda_color: float = 0.1,
+        lambda_internal_geometry: float = 0.0,
         **kwargs
     ):
         super().__init__(*args, **kwargs)
@@ -69,6 +70,7 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
         self.lambda_lpips = lambda_lpips
         self.lambda_tsdf = lambda_tsdf
         self.lambda_color = lambda_color
+        self.lambda_internal_geometry = lambda_internal_geometry
         self.use_color = self.lambda_color > 0
         
         self._init_renderer()
@@ -104,6 +106,76 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
         for k in ret:
             ret[k] = torch.stack(ret[k])
         return ret
+
+    def _camera_pointing_directions(self, extrinsics: torch.Tensor) -> torch.Tensor:
+        """
+        Estimate camera pointing directions in world coordinates.
+        """
+        R = extrinsics[:, :3, :3]
+        t = extrinsics[:, :3, 3]
+        camera_pos = -torch.bmm(R.transpose(1, 2), t.unsqueeze(-1)).squeeze(-1)
+        camera_dirs = -camera_pos
+        norms = camera_dirs.norm(dim=1, keepdim=True)
+
+        # Fallback when camera position is near origin.
+        fallback_dirs = torch.bmm(R.transpose(1, 2), torch.tensor([0.0, 0.0, 1.0], device=R.device, dtype=R.dtype).view(1, 3, 1).expand(R.shape[0], -1, -1)).squeeze(-1)
+        camera_dirs = torch.where(norms > 1e-8, camera_dirs / norms.clamp_min(1e-8), fallback_dirs)
+        camera_dirs = camera_dirs / camera_dirs.norm(dim=1, keepdim=True).clamp_min(1e-8)
+        return camera_dirs
+
+    def _slice_mesh(self, rep: MeshExtractResult, plane_normal: torch.Tensor) -> MeshExtractResult:
+        """
+        Slice mesh with plane through origin and keep the far side relative to the camera.
+        """
+        if not rep.success:
+            return MeshExtractResult(
+                vertices=rep.vertices,
+                faces=rep.faces,
+                vertex_attrs=rep.vertex_attrs,
+                res=rep.res,
+            )
+
+        vertices = rep.vertices
+        faces = rep.faces
+        side = vertices @ plane_normal
+        face_side = side[faces].mean(dim=1)
+        keep_faces = face_side >= 0
+
+        if keep_faces.sum() == 0:
+            empty_vertices = vertices.new_zeros((0, vertices.shape[-1]))
+            empty_faces = faces.new_zeros((0, 3), dtype=torch.long)
+            empty_attrs = None
+            if rep.vertex_attrs is not None:
+                empty_attrs = rep.vertex_attrs.new_zeros((0, rep.vertex_attrs.shape[-1]))
+            sliced_rep = MeshExtractResult(empty_vertices, empty_faces, vertex_attrs=empty_attrs, res=rep.res)
+            sliced_rep.reg_loss = rep.reg_loss
+            sliced_rep.tsdf_v = rep.tsdf_v
+            sliced_rep.tsdf_s = rep.tsdf_s
+            return sliced_rep
+
+        kept_faces = faces[keep_faces]
+        used_vertices = torch.unique(kept_faces.reshape(-1))
+        remap = faces.new_full((vertices.shape[0],), -1)
+        remap[used_vertices] = torch.arange(used_vertices.shape[0], device=faces.device, dtype=faces.dtype)
+        sliced_vertices = vertices[used_vertices]
+        sliced_faces = remap[kept_faces]
+
+        sliced_attrs = None
+        if rep.vertex_attrs is not None:
+            sliced_attrs = rep.vertex_attrs[used_vertices]
+
+        sliced_rep = MeshExtractResult(sliced_vertices, sliced_faces, vertex_attrs=sliced_attrs, res=rep.res)
+        sliced_rep.reg_loss = rep.reg_loss
+        sliced_rep.tsdf_v = rep.tsdf_v
+        sliced_rep.tsdf_s = rep.tsdf_s
+        return sliced_rep
+
+    def _slice_batch_by_camera_plane(self, reps: List[MeshExtractResult], extrinsics: torch.Tensor) -> List[MeshExtractResult]:
+        normals = self._camera_pointing_directions(extrinsics)
+        sliced = []
+        for i, rep in enumerate(reps):
+            sliced.append(self._slice_mesh(rep, normals[i]))
+        return sliced
     
     @staticmethod
     def _tsdf_reg_loss(rep: MeshExtractResult, depth_map: torch.Tensor, extrinsics: torch.Tensor, intrinsics: torch.Tensor) -> torch.Tensor:
@@ -214,6 +286,53 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
                 terms['geo_loss'] = terms['geo_loss'] + terms['normal_map_loss_perceptual'] * self.lambda_color
                 
         return terms
+
+    def internal_geometry_losses(
+        self,
+        reps: List[MeshExtractResult],
+        mesh: List[Dict],
+        normal_map: torch.Tensor,
+        extrinsics: torch.Tensor,
+        intrinsics: torch.Tensor,
+    ):
+        with torch.no_grad():
+            gt_meshes = []
+            for i in range(len(reps)):
+                gt_mesh = MeshExtractResult(mesh[i]['vertices'].to(self.device), mesh[i]['faces'].to(self.device))
+                gt_meshes.append(gt_mesh)
+            sliced_gt_meshes = self._slice_batch_by_camera_plane(gt_meshes, extrinsics)
+            target = self._render_batch(sliced_gt_meshes, extrinsics, intrinsics, return_types=['mask', 'depth', 'normal'])
+            target['normal'] = self._flip_normal(target['normal'], extrinsics, intrinsics)
+
+        sliced_reps = self._slice_batch_by_camera_plane(reps, extrinsics)
+        terms = edict(geo_internal_loss=torch.tensor(0.0, device=self.device))
+
+        return_types = ['mask', 'depth', 'normal', 'normal_map'] if self.use_color else ['mask', 'depth', 'normal']
+        buffer = self._render_batch(sliced_reps, extrinsics, intrinsics, return_types=return_types)
+
+        success_mask = torch.tensor([rep.success for rep in sliced_reps], device=self.device)
+        if success_mask.sum() != 0:
+            for k, v in buffer.items():
+                buffer[k] = v[success_mask]
+            for k, v in target.items():
+                target[k] = v[success_mask]
+
+            terms['internal_mask_loss'] = l1_loss(buffer['mask'], target['mask'])
+            if self.depth_loss_type == 'l1':
+                terms['internal_depth_loss'] = l1_loss(buffer['depth'] * target['mask'], target['depth'] * target['mask'])
+            elif self.depth_loss_type == 'smooth_l1':
+                terms['internal_depth_loss'] = smooth_l1_loss(buffer['depth'] * target['mask'], target['depth'] * target['mask'], beta=1.0 / (2 * sliced_reps[0].res))
+            else:
+                raise ValueError(f"Unsupported depth loss type: {self.depth_loss_type}")
+
+            terms.update(self._perceptual_loss(buffer['normal'] * target['mask'], target['normal'] * target['mask'], 'internal_normal'))
+            terms['geo_internal_loss'] = terms['geo_internal_loss'] + terms['internal_mask_loss'] + terms['internal_depth_loss'] * self.lambda_depth + terms['internal_normal_loss_perceptual']
+
+            if self.use_color and normal_map is not None:
+                terms.update(self._perceptual_loss(normal_map[success_mask], buffer['normal_map'], 'internal_normal_map'))
+                terms['geo_internal_loss'] = terms['geo_internal_loss'] + terms['internal_normal_map_loss_perceptual'] * self.lambda_color
+
+        return terms
       
     def color_losses(self, reps, image, alpha, extrinsics, intrinsics):
         terms = edict(color_loss = torch.tensor(0.0, device=self.device))
@@ -260,6 +379,11 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
         geo_terms = self.geometry_losses(reps, mesh, normal_map, extrinsics, intrinsics)
         terms.update(geo_terms)
         terms['loss'] = terms['loss'] + terms['geo_loss']
+
+        if self.lambda_internal_geometry > 0:
+            geo_internal_terms = self.internal_geometry_losses(reps, mesh, normal_map, extrinsics, intrinsics)
+            terms.update(geo_internal_terms)
+            terms['loss'] = terms['loss'] + terms['geo_internal_loss'] * self.lambda_internal_geometry
                 
         if self.use_color:
             color_terms = self.color_losses(reps, image, alpha, extrinsics, intrinsics)
