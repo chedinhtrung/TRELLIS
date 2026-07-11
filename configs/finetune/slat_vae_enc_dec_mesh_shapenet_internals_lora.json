@@ -76,6 +76,7 @@
             "lambda_tsdf": 0.01,
             "lambda_depth": 10.0,
             "lambda_color": 0.1,
+            "lambda_internal_geometry": 1.0,
             "depth_loss_type": "smooth_l1"
         }
     }
