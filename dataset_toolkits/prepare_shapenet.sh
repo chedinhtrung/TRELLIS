@@ -4,6 +4,7 @@ trap 'status=$?; echo "[stage1] Pipeline failed with exit code $status"; read -r
 REPO_ROOT="/workspace/TRELLIS"
 SHAPENET_PROCESSED="$REPO_ROOT/datasets/ShapeNetTRELLIS_full"
 export SPCONV_ALGO="${SPCONV_ALGO:-native}"
+export ATTN_BACKEND="${ATTN_BACKEND:-sdpa}"
 
 cd "$REPO_ROOT/dataset_toolkits"
 echo "[stage1] Preparing ShapeNetTRELLIS_full subset"
@@ -20,13 +21,13 @@ for split in train val test; do
     python render_kiui.py ShapeNet \
         --output_dir "$SHAPENET_PROCESSED/$split" \
         --num_views 40 \
-        --resolution 338 \
+        --resolution 512 \
         --max_workers 1 & \
 
     python render_cond_kiui.py ShapeNet \
         --output_dir "$SHAPENET_PROCESSED/$split" \
         --num_views 40 \
-        --resolution 338 \
+        --resolution 512 \
         --max_workers 1 & 
 
     wait

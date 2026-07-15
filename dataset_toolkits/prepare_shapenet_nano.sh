@@ -4,6 +4,7 @@ trap 'status=$?; echo "[stage1] Pipeline failed with exit code $status"; read -r
 REPO_ROOT="/workspace/TRELLIS"
 SHAPENET_PROCESSED="$REPO_ROOT/datasets/ShapeNetTRELLIS_nano"
 export SPCONV_ALGO="${SPCONV_ALGO:-native}"
+export ATTN_BACKEND="${ATTN_BACKEND:-sdpa}"
 
 cd "$REPO_ROOT/dataset_toolkits"
 echo "[stage1] Preparing ShapeNetTRELLIS_nano subset"
@@ -15,7 +16,7 @@ python shapenet/shapenet_to_trellis_raw.py \
     --limit 5
 
 echo "[stage1] Rendering images"
-for split in train; do  ## only train set
+for split in train val test; do
     echo "[stage1] Rendering $split split"
 
     python render_kiui.py ShapeNet \

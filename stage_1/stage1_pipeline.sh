@@ -14,7 +14,7 @@ cd "$REPO_ROOT/stage_1"
 #python run_reconstruction_eval.py --dataset-dir "$SHAPENET_PROCESSED"
 
 python run_mesh_reconstruction_eval.py --dataset-dir "$SHAPENET_PROCESSED" \
-    --output-dir "$REPO_ROOT/results/mesh_reconstruction_eval_base" \
-    #--decoder-lora-dir "$REPO_ROOT/results/shapenet_internals_lora/slat_vae" 
+    --output-dir "$REPO_ROOT/results/mesh_reconstruction_eval_lora_rank32_nano" \
+    --decoder-lora-dir "$REPO_ROOT/results/shapenet_nano_lora_rank32/slat_vae" 
 
 
