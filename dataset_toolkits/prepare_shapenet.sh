@@ -1,75 +1,76 @@
+#!/usr/bin/env bash
 set -euo pipefail
-trap 'status=$?; echo "[stage1] Pipeline failed with exit code $status"; read -r -p "Press Enter to exit..."' ERR
 
-REPO_ROOT="/workspace/TRELLIS"
-SHAPENET_PROCESSED="$REPO_ROOT/datasets/ShapeNetTRELLIS_full_cutouts"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+SHAPENET_ROOT="${SHAPENET_ROOT:-$REPO_ROOT/datasets/ShapeNet}"
+SHAPENET_PROCESSED="${SHAPENET_PROCESSED:-$REPO_ROOT/datasets/ShapeNetTRELLIS_full}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+MAX_WORKERS="${MAX_WORKERS:-1}"
+
 export SPCONV_ALGO="${SPCONV_ALGO:-native}"
 export ATTN_BACKEND="${ATTN_BACKEND:-sdpa}"
 
 cd "$REPO_ROOT/dataset_toolkits"
-echo "[stage1] Preparing ShapeNetTRELLIS_full subset"
-# simlink ShapeNet to ShapeNetTRELLIS_nano
-python shapenet/shapenet_to_trellis_raw.py \
-    --shapenet-root "$REPO_ROOT/datasets/ShapeNet" \
+
+echo "[stage1] Preparing all ShapeNet objects in the four project categories"
+"$PYTHON_BIN" shapenet/shapenet_to_trellis_raw.py \
+    --shapenet-root "$SHAPENET_ROOT" \
     --categories car bus file_cabinet cabinet \
-    --outdir "$SHAPENET_PROCESSED" \
-    --limit 300
+    --outdir "$SHAPENET_PROCESSED"
 
-echo "[stage1] Rendering images"
 for split in train val test; do
-    echo "[stage1] Rendering $split split"
+    split_dir="$SHAPENET_PROCESSED/$split"
+    echo "[stage1] Rendering 40 ordinary and 40 conditioning views for $split"
 
-    # comment out cutout_num_views line if we dont want x-ray views to be used in decoder training
-
-    python render_kiui.py ShapeNet \
-        --output_dir "$SHAPENET_PROCESSED/$split" \
-        --num_views 25 \
+    "$PYTHON_BIN" render_kiui.py ShapeNet \
+        --output_dir "$split_dir" \
+        --num_views 40 \
         --resolution 512 \
-        --cutout_num_views 18 \
-        --max_workers 1 & \
+        --max_workers "$MAX_WORKERS" &
+    render_pid=$!
 
-    python render_cond_kiui.py ShapeNet \
-        --output_dir "$SHAPENET_PROCESSED/$split" \
-        --num_views 25 \
+    "$PYTHON_BIN" render_cond_kiui.py ShapeNet \
+        --output_dir "$split_dir" \
+        --num_views 40 \
         --resolution 512 \
-        --max_workers 1 & 
+        --max_workers "$MAX_WORKERS" &
+    cond_render_pid=$!
 
-    wait
+    wait "$render_pid"
+    wait "$cond_render_pid"
 
-    echo "[stage1] Ensuring metadata compliance"
-    python shapenet/ensure_metadata_compliance.py \
-        --metadata "$SHAPENET_PROCESSED/$split/metadata.csv"
-    
-    python build_metadata.py ShapeNet \
-    --output_dir "$SHAPENET_PROCESSED/$split"
+    echo "[stage1] Updating metadata for $split"
+    "$PYTHON_BIN" shapenet/ensure_metadata_compliance.py \
+        --metadata "$split_dir/metadata.csv"
+    "$PYTHON_BIN" build_metadata.py ShapeNet \
+        --output_dir "$split_dir"
 
-    echo "[stage1] Voxelizing $split split"
-    python voxelize.py ShapeNet \
-        --output_dir "$SHAPENET_PROCESSED/$split"
-    
-    python build_metadata.py ShapeNet \
-    --output_dir "$SHAPENET_PROCESSED/$split"
+    echo "[stage1] Voxelizing $split"
+    "$PYTHON_BIN" voxelize.py ShapeNet \
+        --output_dir "$split_dir"
+    "$PYTHON_BIN" build_metadata.py ShapeNet \
+        --output_dir "$split_dir"
 
-    echo "[stage1] Extracting features for $split split"
-    python extract_feature.py \
-        --output_dir "$SHAPENET_PROCESSED/$split"
+    echo "[stage1] Extracting DINOv2 features for $split"
+    "$PYTHON_BIN" extract_feature.py \
+        --output_dir "$split_dir"
+    "$PYTHON_BIN" build_metadata.py ShapeNet \
+        --output_dir "$split_dir"
 
-    python build_metadata.py ShapeNet \
-        --output_dir "$SHAPENET_PROCESSED/$split"
+    echo "[stage1] Encoding SS and SLAT latents for $split"
+    "$PYTHON_BIN" encode_ss_latent.py \
+        --output_dir "$split_dir" &
+    ss_latent_pid=$!
 
-    echo "[stage1] Encoding sparse-structure latents for $split split"
-    python encode_ss_latent.py \
-        --output_dir "$SHAPENET_PROCESSED/$split" &
+    "$PYTHON_BIN" encode_latent.py \
+        --output_dir "$split_dir" &
+    slat_latent_pid=$!
 
-    echo "[stage1] Encoding SLAT latents for $split split"
-    python encode_latent.py \
-        --output_dir "$SHAPENET_PROCESSED/$split" &
-    
-    wait
-    python build_metadata.py ShapeNet \
-        --output_dir "$SHAPENET_PROCESSED/$split"
+    wait "$ss_latent_pid"
+    wait "$slat_latent_pid"
+
+    "$PYTHON_BIN" build_metadata.py ShapeNet \
+        --output_dir "$split_dir"
 done
 
-
-# we dont train the VAEs again, only the flow matching
-# so encode anyway to save time
+echo "[stage1] ShapeNet preparation complete: $SHAPENET_PROCESSED"

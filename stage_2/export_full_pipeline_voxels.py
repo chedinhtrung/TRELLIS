@@ -20,29 +20,42 @@ def read_ids(metadata_path: Path) -> list[str]:
         return [row["sha256"] for row in csv.DictReader(f)]
 
 
-def _load_lora_cfg_from_run(ckpt_path: Path, model_key: str) -> dict | None:
-    """Best-effort load of LoRA hyperparameters from run config.json."""
-    try:
-        config_path = ckpt_path.parents[1] / "config.json"
-        if not config_path.exists():
-            return None
-        with config_path.open("r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        return cfg.get("models", {}).get(model_key, {}).get("lora", None)
-    except Exception:
-        return None
+def read_ids_file(path: Path, dataset_ids: list[str]) -> list[str]:
+    ids = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    unknown = sorted(set(ids) - set(dataset_ids))
+    if unknown:
+        raise ValueError(f"IDs file contains samples absent from dataset metadata: {unknown}")
+    return ids
+
+
+def _load_lora_cfg_from_run(ckpt_path: Path, model_key: str) -> dict:
+    """Load and validate LoRA hyperparameters from the checkpoint's run config."""
+    config_path = ckpt_path.parents[1] / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"LoRA run config not found: {config_path}")
+    with config_path.open("r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    lora_cfg = cfg.get("models", {}).get(model_key, {}).get("lora")
+    if not isinstance(lora_cfg, dict):
+        raise ValueError(f"Missing models.{model_key}.lora configuration in {config_path}")
+    required = {"rank", "alpha", "dropout", "target_patterns"}
+    missing = sorted(required - set(lora_cfg))
+    if missing:
+        raise ValueError(f"Incomplete models.{model_key}.lora configuration in {config_path}: missing {missing}")
+    return lora_cfg
 
 
 def load_lora(model, ckpt_path: Path, *, model_key: str = "denoiser") -> None:
     from trellis.modules.lora import apply_lora
 
-    lora_cfg = _load_lora_cfg_from_run(ckpt_path, model_key) or {}
+    lora_cfg = _load_lora_cfg_from_run(ckpt_path, model_key)
     apply_lora(
         model,
-        rank=lora_cfg.get("rank", 8),
-        alpha=lora_cfg.get("alpha", 8.0),
-        dropout=lora_cfg.get("dropout", 0.0),
-        target_patterns=lora_cfg.get("target_patterns", ["blocks."]),
+        rank=lora_cfg["rank"],
+        alpha=lora_cfg["alpha"],
+        dropout=lora_cfg["dropout"],
+        target_patterns=lora_cfg["target_patterns"],
     )
     state = torch.load(ckpt_path, map_location="cpu")
     missing, unexpected = model.load_state_dict(state, strict=False)
@@ -50,6 +63,7 @@ def load_lora(model, ckpt_path: Path, *, model_key: str = "denoiser") -> None:
     unexpected = [key for key in unexpected if "lora_" in key]
     if missing or unexpected:
         raise RuntimeError(f"LoRA checkpoint mismatch. missing={missing}, unexpected={unexpected}")
+    model.eval()
 
 
 def mesh_to_voxel_points(mesh, resolution: int) -> np.ndarray:
@@ -83,6 +97,8 @@ def main() -> None:
     parser.add_argument("--resolution", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--ids-file", type=Path, default=None, help="Optional text file containing one sample ID per line")
+    parser.add_argument("--view-index", type=int, default=0, help="Numeric renders_cond view index to use")
     parser.add_argument("--skip-existing", action="store_true")
     args = parser.parse_args()
 
@@ -93,8 +109,12 @@ def main() -> None:
     voxel_dir.mkdir(parents=True, exist_ok=True)
 
     ids = read_ids(args.dataset_dir / "metadata.csv")
+    if args.ids_file is not None:
+        ids = read_ids_file(args.ids_file, ids)
     if args.limit is not None:
         ids = ids[:args.limit]
+    if args.view_index < 0:
+        raise ValueError("--view-index must be non-negative")
 
     from trellis.pipelines import TrellisImageTo3DPipeline
 
@@ -126,13 +146,13 @@ def main() -> None:
         if args.skip_existing and voxel_out_path.exists():
             continue
 
-        image_path = args.dataset_dir / "renders_cond" / sample_id / "018.png"
+        image_path = args.dataset_dir / "renders_cond" / sample_id / f"{args.view_index:03d}.png"
         if not image_path.exists():
-            print(f"Skipping missing render: {image_path}")
-            continue
+            raise FileNotFoundError(f"Conditioning render not found: {image_path}")
 
         with Image.open(image_path) as image, torch.inference_mode():
             torch.manual_seed(args.seed)
+            image = pipeline.preprocess_image(image)
             cond = pipeline.get_cond([image])
             coords = pipeline.sample_sparse_structure(cond, num_samples=1)
             slat = pipeline.sample_slat(cond, coords)

@@ -173,7 +173,7 @@ class Trainer:
         pass
 
     @abstractmethod
-    def save(self):
+    def save(self, final=False):
         """
         Save a checkpoint.
         Should be called only by the rank 0 process.
@@ -378,6 +378,26 @@ class Trainer:
         log = []
         time_last_print = 0.0
         time_elapsed = 0.0
+
+        def flush_log():
+            nonlocal log
+            if not self.is_master or len(log) == 0:
+                return
+
+            log_str = '\n'.join([
+                f'{step}: {json.dumps(entry, default=_json_default)}' for step, entry in log
+            ])
+            with open(os.path.join(self.output_dir, 'log.txt'), 'a') as log_file:
+                log_file.write(log_str + '\n')
+
+            log_show = [entry for _, entry in log if not dict_any(entry, lambda x: np.isnan(x))]
+            if len(log_show) > 0:
+                log_show = dict_reduce(log_show, lambda x: np.mean(x))
+                log_show = dict_flatten(log_show, sep='/')
+                for key, value in log_show.items():
+                    self.writer.add_scalar(key, value, self.step)
+            log = []
+
         while self.step < self.max_steps:
             time_start = time.time()
 
@@ -430,28 +450,17 @@ class Trainer:
 
                 # Save log
                 if self.step % self.i_log == 0:
-                    ## save to log file
-                    log_str = '\n'.join([
-                        f'{step}: {json.dumps(log, default=_json_default)}' for step, log in log
-                    ])
-                    with open(os.path.join(self.output_dir, 'log.txt'), 'a') as log_file:
-                        log_file.write(log_str + '\n')
-
-                    # show with mlflow
-                    log_show = [l for _, l in log if not dict_any(l, lambda x: np.isnan(x))]
-                    log_show = dict_reduce(log_show, lambda x: np.mean(x))
-                    log_show = dict_flatten(log_show, sep='/')
-                    for key, value in log_show.items():
-                        self.writer.add_scalar(key, value, self.step)
-                    log = []
+                    flush_log()
 
                 # Save checkpoint
                 if self.step % self.i_save == 0:
                     self.save()
 
-        if self.is_master and self.sample_at_end:
-            self.snapshot(suffix='final', num_samples=self.snapshot_num_samples)
         if self.is_master:
+            flush_log()
+            self.save(final=True)
+            if self.sample_at_end:
+                self.snapshot(suffix='final', num_samples=self.snapshot_num_samples)
             self.writer.close()
             print('Training finished.')
             

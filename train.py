@@ -3,6 +3,7 @@ import sys
 import json
 import glob
 import argparse
+import math
 from easydict import EasyDict as edict
 
 import torch
@@ -38,6 +39,66 @@ def setup_rng(rank):
     torch.cuda.manual_seed_all(rank)
     np.random.seed(rank)
     random.seed(rank)
+
+
+def resolve_training_schedule(cfg, requested_epochs=None):
+    """Resolve step-based or epoch-based training against the filtered dataset."""
+    trainer_args = cfg.trainer.args
+    world_size = cfg.num_nodes * cfg.num_gpus
+    if world_size <= 0:
+        raise ValueError(f'World size must be positive, got {world_size}.')
+
+    resolved = {
+        'data_dir': cfg.data_dir,
+        'world_size': world_size,
+        'max_steps': int(trainer_args.max_steps),
+        'i_save': int(trainer_args.i_save),
+        'epochs': None,
+        'dataset_size': None,
+        'steps_per_epoch': None,
+    }
+    if requested_epochs is None:
+        return resolved
+
+    dataset = getattr(datasets, cfg.dataset.name)(cfg.data_dir, **cfg.dataset.args)
+    dataset_size = len(dataset)
+    if dataset_size == 0:
+        raise ValueError('The filtered training dataset is empty.')
+
+    if trainer_args.get('batch_size_per_gpu', None) is not None:
+        batch_size_per_gpu = int(trainer_args.batch_size_per_gpu)
+    elif trainer_args.get('batch_size', None) is not None:
+        batch_size = int(trainer_args.batch_size)
+        if batch_size % world_size != 0:
+            raise ValueError(
+                f'Global batch size {batch_size} must be divisible by world size {world_size}.'
+            )
+        batch_size_per_gpu = batch_size // world_size
+    else:
+        raise ValueError('Trainer config must define batch_size or batch_size_per_gpu.')
+
+    if batch_size_per_gpu <= 0:
+        raise ValueError(f'Batch size per GPU must be positive, got {batch_size_per_gpu}.')
+
+    # ResumableSampler assigns ceil(N / world_size) samples to each rank, and
+    # every trainer DataLoader uses drop_last=True.
+    samples_per_rank = math.ceil(dataset_size / world_size)
+    steps_per_epoch = samples_per_rank // batch_size_per_gpu
+    if steps_per_epoch == 0:
+        raise ValueError(
+            'The filtered dataset is too small for one complete batch: '
+            f'dataset_size={dataset_size}, world_size={world_size}, '
+            f'batch_size_per_gpu={batch_size_per_gpu}.'
+        )
+
+    trainer_args.max_steps = steps_per_epoch * requested_epochs
+    resolved.update({
+        'max_steps': int(trainer_args.max_steps),
+        'epochs': int(requested_epochs),
+        'dataset_size': int(dataset_size),
+        'steps_per_epoch': int(steps_per_epoch),
+    })
+    return resolved
 
 
 def get_model_summary(model):
@@ -125,6 +186,10 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, default='./data/', help='Data directory')
     parser.add_argument('--auto_retry', type=int, default=3, help='Number of retries on error')
     parser.add_argument('--invisible_weight_scalar', type=float, default=-1.0, help='Sparse SLAT flow loss weight for invisible voxels; <=0 disables weighting')
+    training_length = parser.add_mutually_exclusive_group()
+    training_length.add_argument('--max_steps', type=int, default=None, help='Override trainer max_steps')
+    training_length.add_argument('--epochs', type=int, default=None, help='Train for this many filtered-dataset epochs')
+    parser.add_argument('--i_save', type=int, default=None, help='Override checkpoint save interval')
     ## dubug
     parser.add_argument('--tryrun', action='store_true', help='Try run without training')
     parser.add_argument('--profile', action='store_true', help='Profile training')
@@ -135,16 +200,34 @@ if __name__ == '__main__':
     parser.add_argument('--master_addr', type=str, default='localhost', help='Master address for distributed training')
     parser.add_argument('--master_port', type=str, default='12345', help='Port for distributed training')
     opt = parser.parse_args()
+    if opt.max_steps is not None and opt.max_steps <= 0:
+        parser.error('--max_steps must be positive')
+    if opt.epochs is not None and opt.epochs <= 0:
+        parser.error('--epochs must be positive')
+    if opt.i_save is not None and opt.i_save <= 0:
+        parser.error('--i_save must be positive')
     opt.load_dir = opt.load_dir if opt.load_dir != '' else opt.output_dir
     opt.num_gpus = torch.cuda.device_count() if opt.num_gpus == -1 else opt.num_gpus
     ## Load config
     config = json.load(open(opt.config, 'r'))
+    trainer_args = config.setdefault('trainer', {}).setdefault('args', {})
+    if opt.max_steps is not None:
+        trainer_args['max_steps'] = opt.max_steps
+    if opt.i_save is not None:
+        trainer_args['i_save'] = opt.i_save
     if opt.invisible_weight_scalar > 0:
-        config.setdefault('trainer', {}).setdefault('args', {})['invisible_weight_scalar'] = opt.invisible_weight_scalar
+        trainer_args['invisible_weight_scalar'] = opt.invisible_weight_scalar
     ## Combine arguments and config
     cfg = edict()
     cfg.update(opt.__dict__)
     cfg.update(config)
+    resolved_training = resolve_training_schedule(cfg, requested_epochs=opt.epochs)
+    trainer_args['max_steps'] = resolved_training['max_steps']
+    trainer_args['i_save'] = resolved_training['i_save']
+    config['resolved_training'] = resolved_training
+    cfg.trainer.args.max_steps = resolved_training['max_steps']
+    cfg.trainer.args.i_save = resolved_training['i_save']
+    cfg.resolved_training = edict(resolved_training)
     print('\n\nConfig:')
     print('=' * 80)
     print(json.dumps(cfg.__dict__, indent=4))
@@ -176,5 +259,8 @@ if __name__ == '__main__':
                 break
             except Exception as e:
                 print(f'Error: {e}')
+                if rty + 1 >= cfg.auto_retry:
+                    print(f'All {cfg.auto_retry} training attempts failed.')
+                    raise
                 print(f'Retrying ({rty + 1}/{cfg.auto_retry})...')
             
