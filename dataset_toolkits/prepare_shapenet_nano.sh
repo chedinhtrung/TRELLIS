@@ -2,7 +2,7 @@ set -euo pipefail
 trap 'status=$?; echo "[stage1] Pipeline failed with exit code $status"; read -r -p "Press Enter to exit..."' ERR
 
 REPO_ROOT="/workspace/TRELLIS"
-SHAPENET_PROCESSED="$REPO_ROOT/datasets/ShapeNetTRELLIS_nano"
+SHAPENET_PROCESSED="$REPO_ROOT/datasets/ShapeNetTRELLIS_nano_cutouts"
 export SPCONV_ALGO="${SPCONV_ALGO:-native}"
 export ATTN_BACKEND="${ATTN_BACKEND:-sdpa}"
 
@@ -19,15 +19,18 @@ echo "[stage1] Rendering images"
 for split in train val test; do
     echo "[stage1] Rendering $split split"
 
+    # comment out this line if we dont want x-ray views to be used in decoder training
+    
     python render_kiui.py ShapeNet \
         --output_dir "$SHAPENET_PROCESSED/$split" \
-        --num_views 40 \
+        --num_views 25 \
         --resolution 512 \
+        --cutout_num_views 18 \
         --max_workers 1 & \
 
     python render_cond_kiui.py ShapeNet \
         --output_dir "$SHAPENET_PROCESSED/$split" \
-        --num_views 40 \
+        --num_views 25 \
         --resolution 512 \
         --max_workers 1 & 
 

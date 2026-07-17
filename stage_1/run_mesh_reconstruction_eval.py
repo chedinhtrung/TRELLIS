@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 import trimesh
 from scipy.spatial import cKDTree
 
@@ -280,10 +282,8 @@ def main() -> None:
     """Decode cached SLAT latents into meshes and write mesh metrics."""
     args = parse_args()
     ensure_dir(args.output_dir)
-    grid_mesh_dir = args.output_dir / "recon_meshes_grid"
-    slat_occ_dir = args.output_dir / "recon_slat_occupancy"
-    ensure_dir(grid_mesh_dir)
-    ensure_dir(slat_occ_dir)
+    per_object_root = args.output_dir / "objects"
+    ensure_dir(per_object_root)
 
     metadata = read_metadata(args.dataset_dir)
     if "voxelized" in metadata.columns:
@@ -314,8 +314,10 @@ def main() -> None:
     for index, row in enumerate(selected):
         sample_id = row["sha256"]
         gt_mesh_path = rendered_mesh_path(args.dataset_dir, sample_id)
-        grid_mesh_path = grid_mesh_dir / f"{sample_id}.ply"
-        slat_occ_path = slat_occ_dir / f"{sample_id}.ply"
+        object_dir = per_object_root / sample_id
+        ensure_dir(object_dir)
+        grid_mesh_path = object_dir / "recon_mesh_grid.ply"
+        slat_occ_path = object_dir / "recon_slat_occupancy.ply"
 
         print(f"[{index + 1}/{len(selected)}] Decoding {sample_id}", flush=True)
 

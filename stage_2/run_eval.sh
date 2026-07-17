@@ -11,30 +11,40 @@ cd "$REPO_ROOT"
 SS_LORA_CKPT="${SS_LORA_CKPT:-$OUT_DIR/ss_flow/ckpts/denoiser_lora_step0002000.pt}"
 SLAT_LORA_CKPT="${SLAT_LORA_CKPT:-$OUT_DIR/slat_flow/ckpts/denoiser_lora_step0002000.pt}"
 
+# validation data dir 
+VAL_DIR="$REPO_ROOT/datasets/ShapeNetTRELLIS_nano/train"
+PRED_ROOT="$OUT_DIR"
+OUT_CSV="$OUT_DIR/eval/internal_comparison.csv"
+
 # 1) Sparse-structure flow export: baseline and LoRA
 python stage_2/export_ss_flow_voxels.py \
-    --dataset-dir "$DATA_DIR" \
+    --dataset-dir "$VAL_DIR" \
     --output-dir "$PRED_ROOT/base_ss_flow_voxels" \
-    --skip-existing
+    --skip-existing &
 
 python stage_2/export_ss_flow_voxels.py \
-    --dataset-dir "$DATA_DIR" \
+    --dataset-dir "$VAL_DIR" \
     --output-dir "$PRED_ROOT/ss_flow_voxels" \
     --lora-ckpt "$SS_LORA_CKPT" \
-    --skip-existing
+    --skip-existing &
+
+wait
 
 # 2) Full pipeline export: baseline and LoRA (ss + slat)
 python stage_2/export_full_pipeline_voxels.py \
-    --dataset-dir "$DATA_DIR" \
+    --dataset-dir "$VAL_DIR" \
     --output-dir "$PRED_ROOT/base_ss_slat_voxelized" \
-    --skip-existing
+    --skip-existing &
 
 python stage_2/export_full_pipeline_voxels.py \
-    --dataset-dir "$DATA_DIR" \
+    --dataset-dir "$VAL_DIR" \
     --output-dir "$PRED_ROOT/lora_ss_slat_voxelized" \
     --ss-lora-ckpt "$SS_LORA_CKPT" \
     --slat-lora-ckpt "$SLAT_LORA_CKPT" \
-    --skip-existing
+    --decoder-lora-ckpt "$OUT_DIR/slat_vae/ckpts/decoder_lora_step0001000.pt" \
+    --skip-existing & 
+
+wait
 
 if [ ! -d "$PRED_ROOT" ]; then
     echo "Prediction root not found: $PRED_ROOT"
@@ -43,6 +53,6 @@ if [ ! -d "$PRED_ROOT" ]; then
 fi
 
 python stage_2/compare_internals.py \
-    --gt-voxels "$GT_VOXELS" \
+    --gt-voxels "$VAL_DIR/voxels" \
     --pred-root "$PRED_ROOT" \
     --output "$OUT_CSV"

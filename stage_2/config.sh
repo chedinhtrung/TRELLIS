@@ -2,8 +2,9 @@
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/datasets/ShapeNetTRELLIS_full/train}"
-OUT_DIR="${OUT_DIR:-$REPO_ROOT/results/shapenet_full_rank32_lora}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/datasets/ShapeNetTRELLIS_full_cutouts/train}"
+VAL_DIR="${VAL_DIR:-$REPO_ROOT/datasets/ShapeNetTRELLIS_full_cutouts/val}"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/results/shapenet_full_cutouts_lora}"
 NUM_GPUS="${NUM_GPUS:-1}"
 
 # Avoid xFormers kernels in stage 2 by default. PyTorch SDPA is slower, but it is
@@ -23,7 +24,3 @@ export SPCONV_ALGO="${SPCONV_ALGO:-native}"
 if [[ "${TRELLIS_USE_DINOV2_XFORMERS:-0}" != "1" ]]; then
     export XFORMERS_DISABLED="${XFORMERS_DISABLED:-1}"
 fi
-
-GT_VOXELS="${GT_VOXELS:-$DATA_DIR/voxels}"
-PRED_ROOT="${PRED_ROOT:-$OUT_DIR/predictions}"
-OUT_CSV="${OUT_CSV:-$OUT_DIR/eval/comparison.csv}"

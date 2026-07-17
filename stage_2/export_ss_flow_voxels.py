@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -19,11 +19,31 @@ def read_ids(metadata_path: Path) -> list[str]:
         return [row["sha256"] for row in csv.DictReader(f)]
 
 
+def _load_lora_cfg_from_run(ckpt_path: Path, model_key: str) -> dict | None:
+    """Best-effort load of LoRA hyperparameters from run config.json."""
+    try:
+        config_path = ckpt_path.parents[1] / "config.json"
+        if not config_path.exists():
+            return None
+        with config_path.open("r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg.get("models", {}).get(model_key, {}).get("lora", None)
+    except Exception:
+        return None
+
+
 def load_ss_lora(pipeline, ckpt_path: Path) -> None:
     from trellis.modules.lora import apply_lora
 
     model = pipeline.models["sparse_structure_flow_model"]
-    apply_lora(model, rank=8, alpha=8.0, dropout=0.0, target_patterns=["blocks."])
+    lora_cfg = _load_lora_cfg_from_run(ckpt_path, "denoiser") or {}
+    apply_lora(
+        model,
+        rank=lora_cfg.get("rank", 8),
+        alpha=lora_cfg.get("alpha", 8.0),
+        dropout=lora_cfg.get("dropout", 0.0),
+        target_patterns=lora_cfg.get("target_patterns", ["blocks."]),
+    )
     state = torch.load(ckpt_path, map_location="cpu")
     missing, unexpected = model.load_state_dict(state, strict=False)
     unexpected = [key for key in unexpected if "lora_" in key]

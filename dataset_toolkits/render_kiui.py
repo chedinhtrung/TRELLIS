@@ -36,15 +36,23 @@ def _log(log_file: str, level: str, sha256: str, message: str):
             f.write(line)
 
 
-def _is_complete_output(output_folder: str, num_views: int) -> bool:
+def _is_complete_output(output_folder: str, expected_num_views: int) -> bool:
     if not os.path.isdir(output_folder):
         return False
     if not os.path.exists(os.path.join(output_folder, 'mesh.ply')):
         return False
-    if not os.path.exists(os.path.join(output_folder, 'transforms.json')):
+    transforms_path = os.path.join(output_folder, 'transforms.json')
+    if not os.path.exists(transforms_path):
         return False
     png_count = len([x for x in os.listdir(output_folder) if x.lower().endswith('.png') and x[:3].isdigit()])
-    return png_count == num_views
+    if png_count != expected_num_views:
+        return False
+    try:
+        with open(transforms_path, 'r') as f:
+            transforms = json.load(f)
+        return len(transforms.get('frames', [])) == expected_num_views
+    except Exception:
+        return False
 
 
 def _count_kd_maps(file_path: str) -> int:
@@ -180,6 +188,47 @@ def _build_views(num_views):
     ]
 
 
+def _build_axis_cutout_views(
+    num_views: int,
+    radius: float = 2.0,
+    fov_deg: float = 40.0,
+    jitter_deg: float = 8.0,
+):
+    """Build cutout views on principal axes with slight deterministic jitter.
+
+    The first 6 views are exact ±X/±Y/±Z. Additional views repeat the same
+    axis order with small yaw/pitch offsets so they are nearby-but-distinct.
+    """
+    fov = fov_deg / 180 * np.pi
+    jitter = np.deg2rad(jitter_deg)
+    base_views = [
+        {"yaw": 0.0, "pitch": 0.0, "radius": radius, "fov": fov, "axis": "+x"},
+        {"yaw": np.pi, "pitch": 0.0, "radius": radius, "fov": fov, "axis": "-x"},
+        {"yaw": np.pi / 2, "pitch": 0.0, "radius": radius, "fov": fov, "axis": "+y"},
+        {"yaw": -np.pi / 2, "pitch": 0.0, "radius": radius, "fov": fov, "axis": "-y"},
+        {"yaw": 0.0, "pitch": np.pi / 2, "radius": radius, "fov": fov, "axis": "+z"},
+        {"yaw": 0.0, "pitch": -np.pi / 2, "radius": radius, "fov": fov, "axis": "-z"},
+    ]
+
+    views = []
+    for i in range(max(0, num_views)):
+        base = copy.deepcopy(base_views[i % len(base_views)])
+        cycle_idx = i // len(base_views)
+        if cycle_idx > 0:
+            # Deterministic small offsets that alternate sign and grow mildly.
+            mag = min(1.0, 0.35 + 0.15 * cycle_idx) * jitter
+            sign_yaw = -1.0 if (cycle_idx + (i % 2)) % 2 == 0 else 1.0
+            sign_pitch = -1.0 if (cycle_idx + ((i + 1) % 2)) % 2 == 0 else 1.0
+            yaw_jit = sign_yaw * mag
+            pitch_jit = sign_pitch * (0.65 * mag)
+
+            # Keep near pole views stable by perturbing yaw slightly and clamping pitch.
+            base["yaw"] = float(base["yaw"] + yaw_jit)
+            base["pitch"] = float(np.clip(base["pitch"] + pitch_jit, -np.pi / 2 + 0.08, np.pi / 2 - 0.08))
+        views.append(base)
+    return views
+
+
 def _render_views(
     mesh: Mesh,
     views,
@@ -255,12 +304,104 @@ def _render_views(
 
     return rgba, poses
 
-def _render(file_path, sha256, output_dir, num_views, resolution, denoise, ssaa, log_file, override=False):
+
+def _slice_mesh_far_half(mesh: Mesh, campos: np.ndarray) -> Mesh:
+    """Slice mesh by a plane through origin and keep only the far half.
+
+    The plane normal is the camera principal axis (toward origin), and we drop
+    geometry closer to the camera.
+    """
+    device = mesh.v.device
+    vertices = mesh.v
+    faces = mesh.f.int()
+    if faces.numel() == 0:
+        return Mesh(v=vertices.new_zeros((0, 3)), f=faces.new_zeros((0, 3), dtype=torch.int32), device=device)
+
+    normal = torch.tensor(-campos, dtype=vertices.dtype, device=device)
+    normal = normal / normal.norm().clamp_min(1e-8)
+
+    face_centers = vertices[faces.long()].mean(dim=1)
+    # Keep far half: signed distance >= 0 along camera forward axis.
+    keep_mask = (face_centers @ normal) >= 0
+
+    kept_faces = faces[keep_mask]
+    if kept_faces.shape[0] == 0:
+        return Mesh(v=vertices.new_zeros((0, 3)), f=faces.new_zeros((0, 3), dtype=torch.int32), device=device)
+
+    used_vertices = torch.unique(kept_faces.reshape(-1).long())
+    remap = torch.full((vertices.shape[0],), -1, dtype=torch.int64, device=device)
+    remap[used_vertices] = torch.arange(used_vertices.shape[0], dtype=torch.int64, device=device)
+
+    sliced = Mesh(
+        v=vertices[used_vertices],
+        f=remap[kept_faces.long()].int(),
+        device=device,
+    )
+
+    if mesh.vn is not None and mesh.vn.shape[0] == vertices.shape[0]:
+        sliced.vn = mesh.vn[used_vertices]
+    if mesh.vc is not None and mesh.vc.shape[0] == vertices.shape[0]:
+        sliced.vc = mesh.vc[used_vertices]
+
+    # Keep UV/albedo texturing if present.
+    if mesh.vt is not None and mesh.ft is not None and mesh.ft.shape[0] == faces.shape[0]:
+        kept_ft = mesh.ft.int()[keep_mask]
+        if kept_ft.shape[0] > 0:
+            used_vt = torch.unique(kept_ft.reshape(-1).long())
+            remap_vt = torch.full((mesh.vt.shape[0],), -1, dtype=torch.int64, device=device)
+            remap_vt[used_vt] = torch.arange(used_vt.shape[0], dtype=torch.int64, device=device)
+            sliced.vt = mesh.vt[used_vt]
+            sliced.ft = remap_vt[kept_ft.long()].int()
+            sliced.albedo = mesh.albedo
+
+    sliced.auto_normal()
+    return sliced
+
+
+def _render_cutout_views(
+    mesh: Mesh,
+    views,
+    resolution: int,
+    ssaa: float = 1.0,
+):
+    """Render the same views as normal rendering, but with per-view cutout meshes."""
+    cutout_rgba = []
+    cutout_poses = []
+    for v in views:
+        yaw, pitch, radius = v["yaw"], v["pitch"], v["radius"]
+        campos = np.array([
+            radius * np.cos(yaw) * np.cos(pitch),
+            radius * np.sin(yaw) * np.cos(pitch),
+            radius * np.sin(pitch),
+        ], dtype=np.float32)
+
+        sliced_mesh = _slice_mesh_far_half(mesh, campos)
+        rgba_i, poses_i = _render_views(sliced_mesh, [v], resolution, ssaa=ssaa)
+        cutout_rgba.append(rgba_i[0])
+        cutout_poses.append(poses_i[0])
+
+    cutout_rgba = torch.stack(cutout_rgba, dim=0)
+    cutout_poses = torch.stack(cutout_poses, dim=0)
+    return cutout_rgba, cutout_poses
+
+def _render(
+    file_path,
+    sha256,
+    output_dir,
+    num_views,
+    cutout_num_views,
+    resolution,
+    denoise,
+    ssaa,
+    log_file,
+    override=False,
+):
     final_folder = os.path.join(output_dir, 'renders', sha256)
     tmp_folder = final_folder + '.tmp'
+    expected_num_views = num_views + cutout_num_views
 
     try:
-        if not override and _is_complete_output(final_folder, num_views):
+        if not override and _is_complete_output(final_folder, expected_num_views):
             return {'sha256': sha256, 'rendered': True}
 
         if override and os.path.exists(final_folder):
@@ -285,6 +426,17 @@ def _render(file_path, sha256, output_dir, num_views, resolution, denoise, ssaa,
         for i in range(num_views):
             Image.fromarray(imgs[i], mode='RGBA').save(os.path.join(tmp_folder, f'{i:03d}.png'))
 
+        cutout_views = []
+        cutout_poses_np = None
+        if cutout_num_views > 0:
+            cutout_views = _build_axis_cutout_views(cutout_num_views)
+            cutout_rgba, cutout_poses = _render_cutout_views(mesh, cutout_views, resolution, ssaa=ssaa)
+            cutout_imgs = (cutout_rgba.detach().cpu().numpy() * 255).astype(np.uint8)
+            for i in range(cutout_num_views):
+                file_idx = num_views + i
+                Image.fromarray(cutout_imgs[i], mode='RGBA').save(os.path.join(tmp_folder, f'{file_idx:03d}.png'))
+            cutout_poses_np = cutout_poses.detach().cpu().numpy()
+
         # Export exactly the same rotated mesh used for rendering.
         mesh.write(os.path.join(tmp_folder, 'mesh.ply'))
 
@@ -304,10 +456,23 @@ def _render(file_path, sha256, output_dir, num_views, resolution, denoise, ssaa,
                 }
             )
 
+        if cutout_poses_np is not None:
+            for i, v in enumerate(cutout_views):
+                file_idx = num_views + i
+                to_export['frames'].append(
+                    {
+                        'file_path': f'{file_idx:03d}.png',
+                        'camera_angle_x': float(v['fov']),
+                        'transform_matrix': cutout_poses_np[i].tolist(),
+                        'cutout': True,
+                        'cutout_axis': v.get('axis'),
+                    }
+                )
+
         with open(os.path.join(tmp_folder, 'transforms.json'), 'w') as f:
             json.dump(to_export, f, indent=4)
 
-        if not _is_complete_output(tmp_folder, num_views):
+        if not _is_complete_output(tmp_folder, expected_num_views):
             _log(log_file, 'ERROR', sha256, 'output validation failed (missing png/mesh/transforms)')
             shutil.rmtree(tmp_folder, ignore_errors=True)
             return None
@@ -331,6 +496,7 @@ if __name__ == "__main__":
     parser.add_argument("--resolution", type=int, default=512, help="Render resolution for each image")
     parser.add_argument("--denoise", action="store_true", default=True, help="Kept for CLI compatibility")
     parser.add_argument("--ssaa", type=float, default=2.0, help="Super-sampling anti-aliasing ratio for higher quality")
+    parser.add_argument("--cutout_num_views", type=int, default=0, help="Number of principal-axis cutout views to append")
     parser.add_argument("--override", action="store_true", help="Force re-render by deleting existing outputs")
     dataset_utils.add_args(parser)
     parser.add_argument("--rank", type=int, default=0)
@@ -365,8 +531,9 @@ if __name__ == "__main__":
     records = []
 
     if not opt.override:
+        expected_num_views = opt.num_views + opt.cutout_num_views
         for sha256 in copy.copy(metadata["sha256"].values):
-            if _is_complete_output(os.path.join(opt.output_dir, 'renders', sha256), opt.num_views):
+            if _is_complete_output(os.path.join(opt.output_dir, 'renders', sha256), expected_num_views):
                 records.append({"sha256": sha256, "rendered": True})
                 metadata = metadata[metadata["sha256"] != sha256]
 
@@ -376,6 +543,7 @@ if __name__ == "__main__":
         _render,
         output_dir=opt.output_dir,
         num_views=opt.num_views,
+        cutout_num_views=opt.cutout_num_views,
         resolution=opt.resolution,
         denoise=opt.denoise,
         ssaa=opt.ssaa,

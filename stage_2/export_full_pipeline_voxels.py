@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -20,10 +20,30 @@ def read_ids(metadata_path: Path) -> list[str]:
         return [row["sha256"] for row in csv.DictReader(f)]
 
 
-def load_lora(model, ckpt_path: Path) -> None:
+def _load_lora_cfg_from_run(ckpt_path: Path, model_key: str) -> dict | None:
+    """Best-effort load of LoRA hyperparameters from run config.json."""
+    try:
+        config_path = ckpt_path.parents[1] / "config.json"
+        if not config_path.exists():
+            return None
+        with config_path.open("r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg.get("models", {}).get(model_key, {}).get("lora", None)
+    except Exception:
+        return None
+
+
+def load_lora(model, ckpt_path: Path, *, model_key: str = "denoiser") -> None:
     from trellis.modules.lora import apply_lora
 
-    apply_lora(model, rank=8, alpha=8.0, dropout=0.0, target_patterns=["blocks."])
+    lora_cfg = _load_lora_cfg_from_run(ckpt_path, model_key) or {}
+    apply_lora(
+        model,
+        rank=lora_cfg.get("rank", 8),
+        alpha=lora_cfg.get("alpha", 8.0),
+        dropout=lora_cfg.get("dropout", 0.0),
+        target_patterns=lora_cfg.get("target_patterns", ["blocks."]),
+    )
     state = torch.load(ckpt_path, map_location="cpu")
     missing, unexpected = model.load_state_dict(state, strict=False)
     missing = [key for key in missing if "lora_" in key]
@@ -59,6 +79,7 @@ def main() -> None:
     parser.add_argument("--pipeline", default="microsoft/TRELLIS-image-large")
     parser.add_argument("--ss-lora-ckpt", type=Path, default=None, help="Optional LoRA checkpoint for sparse_structure_flow_model")
     parser.add_argument("--slat-lora-ckpt", type=Path, default=None, help="Optional LoRA checkpoint for slat_flow_model")
+    parser.add_argument("--decoder-lora-ckpt", type=Path, default=None, help="Optional LoRA checkpoint for slat_decoder_mesh")
     parser.add_argument("--resolution", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=None)
@@ -81,15 +102,23 @@ def main() -> None:
     pipeline = TrellisImageTo3DPipeline.from_pretrained(args.pipeline)
     pipeline.to(device)
 
-    use_lora = args.ss_lora_ckpt is not None and args.slat_lora_ckpt is not None
-    if use_lora:
-        print(f"Running with LoRA checkpoints: ss={args.ss_lora_ckpt}, slat={args.slat_lora_ckpt}")
-        load_lora(pipeline.models["sparse_structure_flow_model"], args.ss_lora_ckpt)
-        load_lora(pipeline.models["slat_flow_model"], args.slat_lora_ckpt)
-    elif args.ss_lora_ckpt is None and args.slat_lora_ckpt is None:
-        print("Running base model (no LoRA checkpoints provided)")
-    else:
+    use_flow_lora = args.ss_lora_ckpt is not None and args.slat_lora_ckpt is not None
+    use_decoder_lora = args.decoder_lora_ckpt is not None
+
+    if (args.ss_lora_ckpt is None) != (args.slat_lora_ckpt is None):
         raise ValueError("Provide both --ss-lora-ckpt and --slat-lora-ckpt, or neither")
+
+    if not use_flow_lora and not use_decoder_lora:
+        print("Running base model (no LoRA checkpoints provided)")
+
+    if use_flow_lora:
+        print(f"Applying flow LoRA checkpoints: ss={args.ss_lora_ckpt}, slat={args.slat_lora_ckpt}")
+        load_lora(pipeline.models["sparse_structure_flow_model"], args.ss_lora_ckpt, model_key="denoiser")
+        load_lora(pipeline.models["slat_flow_model"], args.slat_lora_ckpt, model_key="denoiser")
+
+    if use_decoder_lora:
+        print(f"Applying decoder LoRA checkpoint: decoder={args.decoder_lora_ckpt}")
+        load_lora(pipeline.models["slat_decoder_mesh"], args.decoder_lora_ckpt, model_key="decoder")
 
     for sample_id in tqdm(ids, desc="Exporting full-pipeline voxels"):
         mesh_out_path = mesh_dir / f"{sample_id}.ply"
@@ -97,7 +126,7 @@ def main() -> None:
         if args.skip_existing and voxel_out_path.exists():
             continue
 
-        image_path = args.dataset_dir / "renders_cond" / sample_id / "000.png"
+        image_path = args.dataset_dir / "renders_cond" / sample_id / "018.png"
         if not image_path.exists():
             print(f"Skipping missing render: {image_path}")
             continue
