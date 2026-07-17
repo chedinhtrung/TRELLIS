@@ -71,13 +71,20 @@ if [ "$NEW_ENV" = true ] ; then
     conda create -n trellis python=3.10
     conda activate trellis
     conda install pytorch==2.4.0 torchvision==0.19.0 pytorch-cuda=11.8 -c pytorch -c nvidia
-else 
-    apt update
-    apt install -y python3.11 python3.11-venv python3.11-dev
-    python3.11 -m venv /workspace/venv
+else
+    uv venv /workspace/venv --python 3.11
     source /workspace/venv/bin/activate
-    pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
+    uv pip install --upgrade pip setuptools wheel
+    uv pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
+        --index-url https://download.pytorch.org/whl/cu128
 fi
+# else 
+#     apt update
+#     apt install -y python3.11 python3.11-venv python3.11-dev
+#     python3.11 -m venv /workspace/venv
+#     source /workspace/venv/bin/activate
+#     pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
+# fi
 
 # Get system information
 WORKDIR=$(pwd)
