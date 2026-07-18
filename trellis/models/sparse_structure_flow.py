@@ -6,6 +6,7 @@ import numpy as np
 from ..modules.utils import convert_module_to_f16, convert_module_to_f32
 from ..modules.transformer import AbsolutePositionEmbedder, ModulatedTransformerCrossBlock
 from ..modules.spatial import patchify, unpatchify
+from .category_conditioning import CategoryConditioningMixin
 
 
 class TimestepEmbedder(nn.Module):
@@ -52,7 +53,7 @@ class TimestepEmbedder(nn.Module):
         return t_emb
 
 
-class SparseStructureFlowModel(nn.Module):
+class SparseStructureFlowModel(CategoryConditioningMixin, nn.Module):
     """
     Dense DiT-style rectified-flow model for the structure latent grid.
 
@@ -184,7 +185,7 @@ class SparseStructureFlowModel(nn.Module):
         nn.init.constant_(self.out_layer.weight, 0)
         nn.init.constant_(self.out_layer.bias, 0)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor, category=None) -> torch.Tensor:
         """
         Predict rectified-flow velocity for a dense structure latent.
 
@@ -211,7 +212,7 @@ class SparseStructureFlowModel(nn.Module):
             t_emb = self.adaLN_modulation(t_emb)
         t_emb = t_emb.type(self.dtype)
         h = h.type(self.dtype)
-        cond = cond.type(self.dtype)
+        cond = self.append_category_token(cond, category).type(self.dtype)
         # Each block receives timestep modulation via AdaLN and prompt/image
         # conditioning through cross-attention to `cond`.
         for block in self.blocks:

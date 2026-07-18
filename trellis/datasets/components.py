@@ -132,6 +132,6 @@ class ImageConditionedMixin:
         alpha = torch.tensor(np.array(alpha)).float() / 255.0
         image = image * alpha.unsqueeze(0)
         pack['cond'] = image
-       
+        pack['category'] = str(self.metadata.loc[instance]['category'])
+
         return pack
-    

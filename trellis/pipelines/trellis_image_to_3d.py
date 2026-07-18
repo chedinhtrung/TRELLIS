@@ -160,7 +160,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         patchtokens = F.layer_norm(features, features.shape[-1:])
         return patchtokens
         
-    def get_cond(self, image: Union[torch.Tensor, list[Image.Image]]) -> dict:
+    def get_cond(self, image: Union[torch.Tensor, list[Image.Image]], category=None) -> dict:
         """
         Get the conditioning information for the model.
 
@@ -178,10 +178,13 @@ class TrellisImageTo3DPipeline(Pipeline):
         # the effect of the image condition, and the s factor controls how much to apply it. 
         neg_cond = torch.zeros_like(cond)
 
-        return {
+        conditioning = {
             'cond': cond,
             'neg_cond': neg_cond,
         }
+        if category is not None:
+            conditioning['category'] = category
+        return conditioning
 
     def sample_sparse_structure(
         self,
@@ -294,6 +297,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         slat_sampler_params: dict = {},
         formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
         preprocess_image: bool = True,
+        category=None,
     ) -> dict:
         """
         Run the pipeline.
@@ -303,6 +307,7 @@ class TrellisImageTo3DPipeline(Pipeline):
             num_samples (int): The number of samples to generate. The sampler runs num_samples trajectories in parallel, producing
                 num_samples different structured latents, decoded into num_samples different objects. 
             seed (int): The random seed.
+            category: Optional category name used by category-conditioned checkpoints.
             sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
             slat_sampler_params (dict): Additional parameters for the structured latent sampler.
             formats (List[str]): The formats to decode the structured latent to.
@@ -310,7 +315,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         """
         if preprocess_image:
             image = self.preprocess_image(image)
-        cond = self.get_cond([image])
+        cond = self.get_cond([image], category=category)
         torch.manual_seed(seed)
         # Inference intentionally exposes the two boundary tensors: generated sparse
         # coordinates, then generated SLAT features on those coordinates. These are

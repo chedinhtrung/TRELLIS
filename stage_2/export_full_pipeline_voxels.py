@@ -20,6 +20,11 @@ def read_ids(metadata_path: Path) -> list[str]:
         return [row["sha256"] for row in csv.DictReader(f)]
 
 
+def read_categories(metadata_path: Path) -> dict[str, str]:
+    with metadata_path.open(newline="") as f:
+        return {row["sha256"]: row["category"] for row in csv.DictReader(f)}
+
+
 def read_ids_file(path: Path, dataset_ids: list[str]) -> list[str]:
     ids = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     unknown = sorted(set(ids) - set(dataset_ids))
@@ -28,7 +33,7 @@ def read_ids_file(path: Path, dataset_ids: list[str]) -> list[str]:
     return ids
 
 
-def _load_lora_cfg_from_run(ckpt_path: Path, model_key: str) -> dict:
+def _load_model_cfg_from_run(ckpt_path: Path, model_key: str) -> dict:
     """Load and validate LoRA hyperparameters from the checkpoint's run config."""
     config_path = ckpt_path.parents[1] / "config.json"
     if not config_path.exists():
@@ -36,20 +41,22 @@ def _load_lora_cfg_from_run(ckpt_path: Path, model_key: str) -> dict:
     with config_path.open("r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    lora_cfg = cfg.get("models", {}).get(model_key, {}).get("lora")
+    model_cfg = cfg.get("models", {}).get(model_key, {})
+    lora_cfg = model_cfg.get("lora")
     if not isinstance(lora_cfg, dict):
         raise ValueError(f"Missing models.{model_key}.lora configuration in {config_path}")
     required = {"rank", "alpha", "dropout", "target_patterns"}
     missing = sorted(required - set(lora_cfg))
     if missing:
         raise ValueError(f"Incomplete models.{model_key}.lora configuration in {config_path}: missing {missing}")
-    return lora_cfg
+    return model_cfg
 
 
-def load_lora(model, ckpt_path: Path, *, model_key: str = "denoiser") -> None:
+def load_lora(model, ckpt_path: Path, *, model_key: str = "denoiser"):
     from trellis.modules.lora import apply_lora
 
-    lora_cfg = _load_lora_cfg_from_run(ckpt_path, model_key)
+    model_cfg = _load_model_cfg_from_run(ckpt_path, model_key)
+    lora_cfg = model_cfg["lora"]
     apply_lora(
         model,
         rank=lora_cfg["rank"],
@@ -57,13 +64,17 @@ def load_lora(model, ckpt_path: Path, *, model_key: str = "denoiser") -> None:
         dropout=lora_cfg["dropout"],
         target_patterns=lora_cfg["target_patterns"],
     )
+    categories = model_cfg.get("categories")
+    if categories is not None:
+        model.enable_category_conditioning(categories)
     state = torch.load(ckpt_path, map_location="cpu")
     missing, unexpected = model.load_state_dict(state, strict=False)
-    missing = [key for key in missing if "lora_" in key]
-    unexpected = [key for key in unexpected if "lora_" in key]
+    missing = [key for key in missing if "lora_" in key or key.startswith("category_embedding.")]
+    unexpected = [key for key in unexpected if "lora_" in key or key.startswith("category_embedding.")]
     if missing or unexpected:
         raise RuntimeError(f"LoRA checkpoint mismatch. missing={missing}, unexpected={unexpected}")
     model.eval()
+    return categories
 
 
 def mesh_to_voxel_points(mesh, resolution: int) -> np.ndarray:
@@ -108,7 +119,9 @@ def main() -> None:
     mesh_dir.mkdir(parents=True, exist_ok=True)
     voxel_dir.mkdir(parents=True, exist_ok=True)
 
-    ids = read_ids(args.dataset_dir / "metadata.csv")
+    metadata_path = args.dataset_dir / "metadata.csv"
+    ids = read_ids(metadata_path)
+    categories = read_categories(metadata_path)
     if args.ids_file is not None:
         ids = read_ids_file(args.ids_file, ids)
     if args.limit is not None:
@@ -131,10 +144,14 @@ def main() -> None:
     if not use_flow_lora and not use_decoder_lora:
         print("Running base model (no LoRA checkpoints provided)")
 
+    category_names = None
     if use_flow_lora:
         print(f"Applying flow LoRA checkpoints: ss={args.ss_lora_ckpt}, slat={args.slat_lora_ckpt}")
-        load_lora(pipeline.models["sparse_structure_flow_model"], args.ss_lora_ckpt, model_key="denoiser")
-        load_lora(pipeline.models["slat_flow_model"], args.slat_lora_ckpt, model_key="denoiser")
+        ss_categories = load_lora(pipeline.models["sparse_structure_flow_model"], args.ss_lora_ckpt, model_key="denoiser")
+        slat_categories = load_lora(pipeline.models["slat_flow_model"], args.slat_lora_ckpt, model_key="denoiser")
+        if ss_categories != slat_categories:
+            raise ValueError("SS-flow and SLAT-flow category configurations do not match")
+        category_names = ss_categories
 
     if use_decoder_lora:
         print(f"Applying decoder LoRA checkpoint: decoder={args.decoder_lora_ckpt}")
@@ -153,7 +170,8 @@ def main() -> None:
         with Image.open(image_path) as image, torch.inference_mode():
             torch.manual_seed(args.seed)
             image = pipeline.preprocess_image(image)
-            cond = pipeline.get_cond([image])
+            category = [categories[sample_id]] if category_names is not None else None
+            cond = pipeline.get_cond([image], category=category)
             coords = pipeline.sample_sparse_structure(cond, num_samples=1)
             slat = pipeline.sample_slat(cond, coords)
             mesh = pipeline.decode_slat(slat, formats=["mesh"])["mesh"][0]

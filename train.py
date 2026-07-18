@@ -136,6 +136,11 @@ def build_model(model_cfg):
             target_patterns=lora_cfg.get('target_patterns', None),
         )
         print(f'Applied LoRA to {model.__class__.__name__}: {trainable} trainable parameters')
+
+    categories = model_cfg.get('categories', None)
+    if categories is not None:
+        model.enable_category_conditioning(categories)
+        print(f'Enabled category conditioning: {categories}')
     return model
 
 

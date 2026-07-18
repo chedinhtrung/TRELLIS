@@ -10,6 +10,7 @@ from ..modules import sparse as sp
 from ..modules.sparse.transformer import ModulatedSparseTransformerCrossBlock
 from .sparse_structure_flow import TimestepEmbedder
 from .sparse_elastic_mixin import SparseTransformerElasticMixin
+from .category_conditioning import CategoryConditioningMixin
 
 
 class SparseResBlock3d(nn.Module):
@@ -74,7 +75,7 @@ class SparseResBlock3d(nn.Module):
         return h
     
 
-class SLatFlowModel(nn.Module):
+class SLatFlowModel(CategoryConditioningMixin, nn.Module):
     """
     Sparse rectified-flow model for SLAT features.
 
@@ -254,7 +255,7 @@ class SLatFlowModel(nn.Module):
         nn.init.constant_(self.out_layer.weight, 0)
         nn.init.constant_(self.out_layer.bias, 0)
 
-    def forward(self, x: sp.SparseTensor, t: torch.Tensor, cond: torch.Tensor) -> sp.SparseTensor:
+    def forward(self, x: sp.SparseTensor, t: torch.Tensor, cond: torch.Tensor, category=None) -> sp.SparseTensor:
         """Predict rectified-flow velocity for sparse SLAT features.
 
         Args:
@@ -271,7 +272,7 @@ class SLatFlowModel(nn.Module):
         if self.share_mod:
             t_emb = self.adaLN_modulation(t_emb)
         t_emb = t_emb.type(self.dtype)
-        cond = cond.type(self.dtype)
+        cond = self.append_category_token(cond, category).type(self.dtype)
 
         skips = []
         # Optional sparse IO blocks pack local 3D context before global sparse

@@ -19,6 +19,11 @@ def read_ids(metadata_path: Path) -> list[str]:
         return [row["sha256"] for row in csv.DictReader(f)]
 
 
+def read_categories(metadata_path: Path) -> dict[str, str]:
+    with metadata_path.open(newline="") as f:
+        return {row["sha256"]: row["category"] for row in csv.DictReader(f)}
+
+
 def read_ids_file(path: Path, dataset_ids: list[str]) -> list[str]:
     ids = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     unknown = sorted(set(ids) - set(dataset_ids))
@@ -27,7 +32,7 @@ def read_ids_file(path: Path, dataset_ids: list[str]) -> list[str]:
     return ids
 
 
-def _load_lora_cfg_from_run(ckpt_path: Path, model_key: str) -> dict:
+def _load_model_cfg_from_run(ckpt_path: Path, model_key: str) -> dict:
     """Load and validate LoRA hyperparameters from the checkpoint's run config."""
     config_path = ckpt_path.parents[1] / "config.json"
     if not config_path.exists():
@@ -35,21 +40,23 @@ def _load_lora_cfg_from_run(ckpt_path: Path, model_key: str) -> dict:
     with config_path.open("r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    lora_cfg = cfg.get("models", {}).get(model_key, {}).get("lora")
+    model_cfg = cfg.get("models", {}).get(model_key, {})
+    lora_cfg = model_cfg.get("lora")
     if not isinstance(lora_cfg, dict):
         raise ValueError(f"Missing models.{model_key}.lora configuration in {config_path}")
     required = {"rank", "alpha", "dropout", "target_patterns"}
     missing = sorted(required - set(lora_cfg))
     if missing:
         raise ValueError(f"Incomplete models.{model_key}.lora configuration in {config_path}: missing {missing}")
-    return lora_cfg
+    return model_cfg
 
 
-def load_ss_lora(pipeline, ckpt_path: Path) -> None:
+def load_ss_lora(pipeline, ckpt_path: Path):
     from trellis.modules.lora import apply_lora
 
     model = pipeline.models["sparse_structure_flow_model"]
-    lora_cfg = _load_lora_cfg_from_run(ckpt_path, "denoiser")
+    model_cfg = _load_model_cfg_from_run(ckpt_path, "denoiser")
+    lora_cfg = model_cfg["lora"]
     apply_lora(
         model,
         rank=lora_cfg["rank"],
@@ -57,13 +64,17 @@ def load_ss_lora(pipeline, ckpt_path: Path) -> None:
         dropout=lora_cfg["dropout"],
         target_patterns=lora_cfg["target_patterns"],
     )
+    categories = model_cfg.get("categories")
+    if categories is not None:
+        model.enable_category_conditioning(categories)
     state = torch.load(ckpt_path, map_location="cpu")
     missing, unexpected = model.load_state_dict(state, strict=False)
-    unexpected = [key for key in unexpected if "lora_" in key]
-    missing = [key for key in missing if "lora_" in key]
+    unexpected = [key for key in unexpected if "lora_" in key or key.startswith("category_embedding.")]
+    missing = [key for key in missing if "lora_" in key or key.startswith("category_embedding.")]
     if missing or unexpected:
         raise RuntimeError(f"LoRA checkpoint mismatch. missing={missing}, unexpected={unexpected}")
     model.eval()
+    return categories
 
 
 def coords_to_points(coords: torch.Tensor, resolution: int) -> np.ndarray:
@@ -88,7 +99,9 @@ def main() -> None:
     parser.add_argument("--skip-existing", action="store_true")
     args = parser.parse_args()
 
-    ids = read_ids(args.dataset_dir / "metadata.csv")
+    metadata_path = args.dataset_dir / "metadata.csv"
+    ids = read_ids(metadata_path)
+    categories = read_categories(metadata_path)
     if args.ids_file is not None:
         ids = read_ids_file(args.ids_file, ids)
     if args.limit is not None:
@@ -102,9 +115,10 @@ def main() -> None:
     pipeline = TrellisImageTo3DPipeline.from_pretrained(args.pipeline)
     pipeline.to(device)
 
+    category_names = None
     if args.lora_ckpt is not None:
         print(f"Running with LoRA checkpoint: {args.lora_ckpt}")
-        load_ss_lora(pipeline, args.lora_ckpt)
+        category_names = load_ss_lora(pipeline, args.lora_ckpt)
     else:
         print("Running base model (no LoRA checkpoint provided)")
 
@@ -127,7 +141,8 @@ def main() -> None:
         with Image.open(image_path) as image, torch.inference_mode():
             torch.manual_seed(args.seed)
             image = pipeline.preprocess_image(image)
-            cond = pipeline.get_cond([image])
+            category = [categories[sample_id]] if category_names is not None else None
+            cond = pipeline.get_cond([image], category=category)
             coords = pipeline.sample_sparse_structure(cond, num_samples=1, sampler_params=sampler_params)
 
         points = coords_to_points(coords, args.resolution)
