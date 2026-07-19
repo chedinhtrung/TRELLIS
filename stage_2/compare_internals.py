@@ -17,12 +17,17 @@ def read_voxels(path: Path, resolution: int) -> set[tuple[int, int, int]]:
     return {tuple(voxel) for voxel in voxels.tolist()}
 
 
-def interior(voxels: set[tuple[int, int, int]]) -> set[tuple[int, int, int]]:
-    """Return the axis-extrema proxy for internal voxels."""
+def interior(
+    voxels: set[tuple[int, int, int]],
+    margin: int = 1,
+) -> set[tuple[int, int, int]]:
+    """Return voxels at least ``margin`` grid cells behind every axis extremum."""
+    if margin < 1:
+        raise ValueError("margin must be at least 1")
     if not voxels:
         return set()
 
-    surface = set()
+    internal = set(voxels)
     for axis in range(3):
         groups = {}
         other_axes = [i for i in range(3) if i != axis]
@@ -30,9 +35,12 @@ def interior(voxels: set[tuple[int, int, int]]) -> set[tuple[int, int, int]]:
             key = (voxel[other_axes[0]], voxel[other_axes[1]])
             groups.setdefault(key, []).append(voxel)
         for group in groups.values():
-            surface.add(min(group, key=lambda voxel: voxel[axis]))
-            surface.add(max(group, key=lambda voxel: voxel[axis]))
-    return voxels - surface
+            minimum = min(voxel[axis] for voxel in group)
+            maximum = max(voxel[axis] for voxel in group)
+            for voxel in group:
+                if voxel[axis] - minimum < margin or maximum - voxel[axis] < margin:
+                    internal.discard(voxel)
+    return internal
 
 
 def safe_ratio(numerator: int, denominator: int, both_empty: bool) -> float:
@@ -41,11 +49,13 @@ def safe_ratio(numerator: int, denominator: int, both_empty: bool) -> float:
     return 1.0 if both_empty else 0.0
 
 
-def score_pair(gt_path: Path, pred_path: Path, resolution: int) -> dict[str, float | int]:
-    gt = read_voxels(gt_path, resolution)
-    pred = read_voxels(pred_path, resolution)
-    gt_internal = interior(gt)
-    pred_internal = interior(pred)
+def score_pair(
+    gt: set[tuple[int, int, int]],
+    pred: set[tuple[int, int, int]],
+    margin: int = 1,
+) -> dict[str, float | int]:
+    gt_internal = interior(gt, margin)
+    pred_internal = interior(pred, margin)
 
     true_positive = len(gt_internal & pred_internal)
     precision = safe_ratio(true_positive, len(pred_internal), not gt_internal)
@@ -90,7 +100,13 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--per-sample-output", type=Path, required=True)
     parser.add_argument("--resolution", type=int, default=64)
+    parser.add_argument("--margins", type=int, nargs="+", default=[1, 2, 3, 4])
     args = parser.parse_args()
+
+    if any(margin < 1 for margin in args.margins):
+        parser.error("--margins must contain positive integers")
+    if len(args.margins) != len(set(args.margins)):
+        parser.error("--margins must not contain duplicates")
 
     ids = read_ids(args.ids_file)
     categories = read_categories(args.metadata)
@@ -110,7 +126,7 @@ def main() -> None:
 
         for seed_dir in seed_dirs:
             seed = seed_dir.name.removeprefix("seed_")
-            seed_rows = []
+            seed_rows = {margin: [] for margin in args.margins}
             for sample_id in ids:
                 gt_path = args.gt_voxels / f"{sample_id}.ply"
                 pred_path = seed_dir / "voxels" / f"{sample_id}.ply"
@@ -119,23 +135,28 @@ def main() -> None:
                 if not pred_path.is_file():
                     raise FileNotFoundError(f"Missing prediction: {pred_path}")
 
-                metrics = score_pair(gt_path, pred_path, args.resolution)
-                row = {
+                gt = read_voxels(gt_path, args.resolution)
+                pred = read_voxels(pred_path, args.resolution)
+                for margin in args.margins:
+                    row = {
+                        "method": method,
+                        "seed": seed,
+                        "sample_id": sample_id,
+                        "category": categories[sample_id],
+                        "margin": margin,
+                        **score_pair(gt, pred, margin),
+                    }
+                    per_sample_rows.append(row)
+                    seed_rows[margin].append(row)
+
+            for margin, rows in seed_rows.items():
+                summary_rows.append({
                     "method": method,
                     "seed": seed,
-                    "sample_id": sample_id,
-                    "category": categories[sample_id],
-                    **metrics,
-                }
-                per_sample_rows.append(row)
-                seed_rows.append(row)
-
-            summary_rows.append({
-                "method": method,
-                "seed": seed,
-                **{name: float(np.mean([row[name] for row in seed_rows])) for name in metric_names},
-                "matched_samples": len(seed_rows),
-            })
+                    "margin": margin,
+                    **{name: float(np.mean([row[name] for row in rows])) for name in metric_names},
+                    "matched_samples": len(rows),
+                })
 
     args.per_sample_output.parent.mkdir(parents=True, exist_ok=True)
     with args.per_sample_output.open("w", newline="") as f:
@@ -151,7 +172,7 @@ def main() -> None:
 
     for row in summary_rows:
         print(
-            f"{row['method']} seed={row['seed']}: "
+            f"{row['method']} seed={row['seed']} margin={row['margin']}: "
             f"IoU={row['voxel_iou']:.4f}, internal F1={row['internal_f1']:.4f}"
         )
     print(f"Wrote {args.output}")
