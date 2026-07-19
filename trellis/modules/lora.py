@@ -86,4 +86,5 @@ def lora_state_dict(model: nn.Module) -> dict:
         if ".lora_down" in name
         or ".lora_up" in name
         or name.startswith("category_embedding.")
+        or name.startswith("interior_expert.")
     }

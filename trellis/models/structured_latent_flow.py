@@ -7,6 +7,7 @@ from ..modules.utils import zero_module, convert_module_to_f16, convert_module_t
 from ..modules.transformer import AbsolutePositionEmbedder
 from ..modules.norm import LayerNorm32
 from ..modules import sparse as sp
+from ..modules.sparse.geometry import axis_interior_mask
 from ..modules.sparse.transformer import ModulatedSparseTransformerCrossBlock
 from .sparse_structure_flow import TimestepEmbedder
 from .sparse_elastic_mixin import SparseTransformerElasticMixin
@@ -201,6 +202,8 @@ class SLatFlowModel(CategoryConditioningMixin, nn.Module):
                 ])
             
         self.out_layer = sp.SparseLinear(model_channels if io_block_channels is None else io_block_channels[0], out_channels)
+        self.interior_expert = None
+        self.interior_expert_margin = None
 
         self.initialize_weights()
         if use_fp16:
@@ -255,6 +258,27 @@ class SLatFlowModel(CategoryConditioningMixin, nn.Module):
         nn.init.constant_(self.out_layer.weight, 0)
         nn.init.constant_(self.out_layer.bias, 0)
 
+    def enable_interior_expert(self, hidden_channels: int = 256, margin: int = 2) -> None:
+        """Add a residual output expert used only on geometrically internal voxels."""
+        if self.interior_expert is not None:
+            raise RuntimeError("Interior expert is already enabled")
+        if hidden_channels <= 0:
+            raise ValueError("hidden_channels must be positive")
+        if margin < 1:
+            raise ValueError("margin must be at least 1")
+
+        input_channels = self.model_channels if self.io_block_channels is None else self.io_block_channels[0]
+        expert = nn.Sequential(
+            nn.Linear(input_channels, hidden_channels),
+            nn.SiLU(),
+            nn.Linear(hidden_channels, self.out_channels),
+        )
+        nn.init.zeros_(expert[-1].weight)
+        nn.init.zeros_(expert[-1].bias)
+        reference = next(self.out_layer.parameters())
+        self.interior_expert = expert.to(device=reference.device, dtype=reference.dtype)
+        self.interior_expert_margin = int(margin)
+
     def forward(self, x: sp.SparseTensor, t: torch.Tensor, cond: torch.Tensor, category=None) -> sp.SparseTensor:
         """Predict rectified-flow velocity for sparse SLAT features.
 
@@ -299,9 +323,15 @@ class SLatFlowModel(CategoryConditioningMixin, nn.Module):
             else:
                 h = block(h, t_emb)
 
-        h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
-        h = self.out_layer(h.type(x.dtype))
-        return h
+        h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:])).type(x.dtype)
+        output = self.out_layer(h)
+        if self.interior_expert is not None:
+            route = axis_interior_mask(h.coords, self.interior_expert_margin)
+            correction = self.interior_expert(h.feats)
+            output = output.replace(
+                output.feats + correction * route.unsqueeze(1).to(correction.dtype)
+            )
+        return output
     
 
 class ElasticSLatFlowModel(SparseTransformerElasticMixin, SLatFlowModel):

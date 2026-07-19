@@ -174,6 +174,17 @@ def build_model(model_cfg):
                 f'missing={missing_lora}, unexpected={unexpected}'
             )
         print(f'Initialized LoRA from {init_lora_ckpt}')
+
+    interior_expert_cfg = model_cfg.get('interior_expert', None)
+    if interior_expert_cfg is not None:
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        model.enable_interior_expert(
+            hidden_channels=interior_expert_cfg.get('hidden_channels', 256),
+            margin=interior_expert_cfg.get('margin', 2),
+        )
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        print(f'Enabled interior expert: {trainable} trainable parameters')
     return model
 
 

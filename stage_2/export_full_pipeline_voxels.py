@@ -67,12 +67,33 @@ def load_lora(model, ckpt_path: Path, *, model_key: str = "denoiser"):
     categories = model_cfg.get("categories")
     if categories is not None:
         model.enable_category_conditioning(categories)
-    state = torch.load(ckpt_path, map_location="cpu")
+    interior_expert_cfg = model_cfg.get("interior_expert")
+    if interior_expert_cfg is not None:
+        if not hasattr(model, "enable_interior_expert"):
+            raise ValueError(f"{model.__class__.__name__} does not support an interior expert")
+        model.enable_interior_expert(
+            hidden_channels=interior_expert_cfg.get("hidden_channels", 256),
+            margin=interior_expert_cfg.get("margin", 2),
+        )
+
+    state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    expected = {
+        key
+        for key in model.state_dict()
+        if ".lora_down" in key
+        or ".lora_up" in key
+        or key.startswith("category_embedding.")
+        or key.startswith("interior_expert.")
+    }
+    if set(state) != expected:
+        raise RuntimeError(
+            f"Adapter checkpoint mismatch. missing={sorted(expected - set(state))}, "
+            f"unexpected={sorted(set(state) - expected)}"
+        )
     missing, unexpected = model.load_state_dict(state, strict=False)
-    missing = [key for key in missing if "lora_" in key or key.startswith("category_embedding.")]
-    unexpected = [key for key in unexpected if "lora_" in key or key.startswith("category_embedding.")]
+    missing = [key for key in missing if key in expected]
     if missing or unexpected:
-        raise RuntimeError(f"LoRA checkpoint mismatch. missing={missing}, unexpected={unexpected}")
+        raise RuntimeError(f"Adapter checkpoint mismatch. missing={missing}, unexpected={unexpected}")
     model.eval()
     return categories
 
