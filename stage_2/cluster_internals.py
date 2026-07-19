@@ -25,7 +25,7 @@ def load_sklearn():
 
 
 def make_feature(voxels, margin):
-    """Max-pool the 64^3 internal occupancy mask to a flat 16^3 vector."""
+    """Return an L2-normalized, max-pooled 16^3 internal occupancy vector."""
     internal_voxels = interior(voxels, margin)
     grid = np.zeros(
         (FEATURE_RESOLUTION, FEATURE_RESOLUTION, FEATURE_RESOLUTION),
@@ -35,7 +35,11 @@ def make_feature(voxels, margin):
         coordinates = np.asarray(list(internal_voxels), dtype=np.int32)
         coordinates //= VOXEL_RESOLUTION // FEATURE_RESOLUTION
         grid[coordinates[:, 0], coordinates[:, 1], coordinates[:, 2]] = 1.0
-    return grid.reshape(-1), len(internal_voxels)
+    feature = grid.reshape(-1)
+    norm = np.linalg.norm(feature)
+    if norm > 0:
+        feature /= norm
+    return feature, len(internal_voxels)
 
 
 def load_split(dataset_root, split, margin):
@@ -196,6 +200,7 @@ def main():
                 "margin": args.margin,
                 "clusters": args.clusters,
                 "pca_components": num_components,
+                "l2_normalized": True,
                 "seed": args.seed,
                 "train_samples": int(np.sum(labels_by_split["train"] == cluster)),
                 "val_samples": int(np.sum(labels_by_split["val"] == cluster)),
@@ -241,6 +246,7 @@ def main():
             "margin",
             "clusters",
             "pca_components",
+            "l2_normalized",
             "seed",
             "train_samples",
             "val_samples",
