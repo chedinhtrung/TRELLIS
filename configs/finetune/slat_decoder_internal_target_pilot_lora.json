@@ -1,0 +1,84 @@
+{
+    "models": {
+        "decoder": {
+            "name": "ElasticSLatMeshDecoder",
+            "pretrained": "microsoft/TRELLIS-image-large/ckpts/slat_dec_mesh_swin8_B_64l8m256c_fp16",
+            "init_lora_ckpt": "results/objective1_full/decoder/ckpts/decoder_lora_final.pt",
+            "args": {
+                "resolution": 64,
+                "model_channels": 768,
+                "latent_channels": 8,
+                "num_blocks": 12,
+                "num_heads": 12,
+                "mlp_ratio": 4,
+                "attn_mode": "swin",
+                "window_size": 8,
+                "use_fp16": true,
+                "representation_config": {
+                    "use_color": true
+                }
+            },
+            "lora": {
+                "rank": 32,
+                "alpha": 32.0,
+                "dropout": 0.0,
+                "target_patterns": ["blocks."]
+            }
+        }
+    },
+    "dataset": {
+        "name": "Slat2RenderGeo",
+        "args": {
+            "image_size": 512,
+            "latent_model": "dinov2_vitl14_reg_slat_enc_swin8_B_64l8_fp16_internal_v1",
+            "min_aesthetic_score": 0.0,
+            "max_num_voxels": 32768
+        }
+    },
+    "trainer": {
+        "name": "SLatVaeMeshDecoderTrainer",
+        "args": {
+            "max_steps": 400,
+            "batch_size_per_gpu": 2,
+            "batch_split": 1,
+            "optimizer": {
+                "name": "AdamW",
+                "args": {
+                    "lr": 0.0001,
+                    "weight_decay": 0.0
+                }
+            },
+            "ema_rate": [0.9999],
+            "fp16_mode": "inflat_all",
+            "fp16_scale_growth": 0.001,
+            "elastic": {
+                "name": "LinearMemoryController",
+                "args": {
+                    "target_ratio": 0.75,
+                    "max_mem_ratio_start": 0.5
+                }
+            },
+            "grad_clip": {
+                "name": "AdaptiveGradClipper",
+                "args": {
+                    "max_norm": 1.0,
+                    "clip_percentile": 95
+                }
+            },
+            "i_log": 20,
+            "i_print": 10,
+            "i_sample": 10000,
+            "snapshot_num_samples": 4,
+            "i_save": 100,
+            "sample_at_start": false,
+            "sample_at_end": false,
+            "lambda_ssim": 0.2,
+            "lambda_lpips": 0.2,
+            "lambda_tsdf": 0.01,
+            "lambda_depth": 10.0,
+            "lambda_color": 0.1,
+            "lambda_internal_geometry": 1.0,
+            "depth_loss_type": "smooth_l1"
+        }
+    }
+}
