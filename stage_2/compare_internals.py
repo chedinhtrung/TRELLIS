@@ -62,9 +62,17 @@ def score_pair(
     recall = safe_ratio(true_positive, len(gt_internal), not pred_internal)
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     union = gt | pred
+    gt_exterior = gt - gt_internal
+    pred_exterior = pred - pred_internal
+    exterior_union = gt_exterior | pred_exterior
 
     return {
         "voxel_iou": len(gt & pred) / len(union) if union else 1.0,
+        "exterior_iou": (
+            len(gt_exterior & pred_exterior) / len(exterior_union)
+            if exterior_union
+            else 1.0
+        ),
         "internal_precision": precision,
         "internal_recall": recall,
         "internal_f1": f1,
@@ -116,7 +124,13 @@ def main() -> None:
 
     per_sample_rows = []
     summary_rows = []
-    metric_names = ["voxel_iou", "internal_precision", "internal_recall", "internal_f1"]
+    metric_names = [
+        "voxel_iou",
+        "exterior_iou",
+        "internal_precision",
+        "internal_recall",
+        "internal_f1",
+    ]
 
     for method in args.methods:
         method_dir = args.pred_root / method
@@ -173,7 +187,8 @@ def main() -> None:
     for row in summary_rows:
         print(
             f"{row['method']} seed={row['seed']} margin={row['margin']}: "
-            f"IoU={row['voxel_iou']:.4f}, internal F1={row['internal_f1']:.4f}"
+            f"IoU={row['voxel_iou']:.4f}, exterior IoU={row['exterior_iou']:.4f}, "
+            f"internal F1={row['internal_f1']:.4f}"
         )
     print(f"Wrote {args.output}")
     print(f"Wrote {args.per_sample_output}")
