@@ -279,7 +279,14 @@ class SLatFlowModel(CategoryConditioningMixin, nn.Module):
         self.interior_expert = expert.to(device=reference.device, dtype=reference.dtype)
         self.interior_expert_margin = int(margin)
 
-    def forward(self, x: sp.SparseTensor, t: torch.Tensor, cond: torch.Tensor, category=None) -> sp.SparseTensor:
+    def forward(
+        self,
+        x: sp.SparseTensor,
+        t: torch.Tensor,
+        cond: torch.Tensor,
+        category=None,
+        return_interior_expert_aux: bool = False,
+    ) -> Union[sp.SparseTensor, Tuple[sp.SparseTensor, Dict[str, torch.Tensor]]]:
         """Predict rectified-flow velocity for sparse SLAT features.
 
         Args:
@@ -328,9 +335,18 @@ class SLatFlowModel(CategoryConditioningMixin, nn.Module):
         if self.interior_expert is not None:
             route = axis_interior_mask(h.coords, self.interior_expert_margin)
             correction = self.interior_expert(h.feats)
+            base_feats = output.feats
             output = output.replace(
-                output.feats + correction * route.unsqueeze(1).to(correction.dtype)
+                base_feats + correction * route.unsqueeze(1).to(correction.dtype)
             )
+            if return_interior_expert_aux:
+                return output, {
+                    "route": route,
+                    "base_feats": base_feats,
+                    "correction": correction,
+                }
+        elif return_interior_expert_aux:
+            raise RuntimeError("Interior-expert diagnostics requested, but no expert is enabled")
         return output
     
 

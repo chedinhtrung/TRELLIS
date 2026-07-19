@@ -136,15 +136,70 @@ class SparseFlowMatchingTrainer(FlowMatchingTrainer):
         x_t = self.diffuse(x_0, t, noise=noise)
         cond = self.get_cond(cond, **kwargs)
         
-        pred = self.training_models['denoiser'](x_t, t * 1000, cond, **kwargs)
+        denoiser = self.models['denoiser']
+        use_interior_expert = getattr(denoiser, 'interior_expert', None) is not None
+        expert_aux = None
+        if use_interior_expert:
+            pred, expert_aux = self.training_models['denoiser'](
+                x_t,
+                t * 1000,
+                cond,
+                return_interior_expert_aux=True,
+                **kwargs,
+            )
+        else:
+            pred = self.training_models['denoiser'](x_t, t * 1000, cond, **kwargs)
         assert pred.shape == noise.shape == x_0.shape
         target = self.get_v(x_0, noise, t)
         terms = edict()
+        status = edict()
 
         # Loss is computed on sparse features. By default (scalar <= 0) this is a
         # uniform mean MSE. If scalar > 0, voxels outside the axis-extrema surface
         # proxy are upweighted as "invisible" voxels.
-        if self.invisible_weight_scalar <= 0:
+        if expert_aux is not None:
+            route = expert_aux['route']
+            routed_count = route.sum()
+            if routed_count.item() == 0:
+                raise RuntimeError(
+                    "The interior-expert route selected no voxels. "
+                    "Check the sparse targets and interior-expert margin."
+                )
+
+            # The base transformer and Objective-1 LoRA are frozen for this run.
+            # Only routed voxels can depend on the expert, so supervise exactly
+            # those voxels instead of diluting the loss with constant exterior MSE.
+            routed_pred = pred.feats[route]
+            routed_target = target.feats[route]
+            terms["mse"] = F.mse_loss(routed_pred, routed_target)
+
+            routed_base_mse = F.mse_loss(
+                expert_aux['base_feats'][route], routed_target
+            )
+            correction_rms = expert_aux['correction'][route].float().pow(2).mean().sqrt()
+            status["interior_expert"] = {
+                "routed_base_mse": routed_base_mse.detach(),
+                "routed_corrected_mse": terms["mse"].detach(),
+                "correction_rms": correction_rms.detach(),
+                "routed_fraction": route.float().mean().detach(),
+                "routed_count": routed_count.detach(),
+            }
+
+            mse_per_instance = []
+            for i in range(x_0.shape[0]):
+                rows = x_0.layout[i]
+                sample_route = route[rows]
+                if sample_route.any():
+                    mse_per_instance.append(
+                        F.mse_loss(
+                            pred.feats[rows][sample_route],
+                            target.feats[rows][sample_route],
+                        ).item()
+                    )
+                else:
+                    mse_per_instance.append(np.nan)
+            mse_per_instance = np.array(mse_per_instance)
+        elif self.invisible_weight_scalar <= 0:
             terms["mse"] = F.mse_loss(pred.feats, target.feats)
             mse_per_instance = np.array([
                 F.mse_loss(pred.feats[x_0.layout[i]], target.feats[x_0.layout[i]]).item()
@@ -177,10 +232,11 @@ class SparseFlowMatchingTrainer(FlowMatchingTrainer):
         # log loss with time bins
         time_bin = np.digitize(t.cpu().numpy(), np.linspace(0, 1, 11)) - 1
         for i in range(10):
-            if (time_bin == i).sum() != 0:
-                terms[f"bin_{i}"] = {"mse": mse_per_instance[time_bin == i].mean()}
+            in_bin = (time_bin == i) & np.isfinite(mse_per_instance)
+            if in_bin.any():
+                terms[f"bin_{i}"] = {"mse": mse_per_instance[in_bin].mean()}
 
-        return terms, {}
+        return terms, status
     
     @torch.no_grad()
     def run_snapshot(

@@ -181,7 +181,7 @@ def main() -> None:
     for sample_id in tqdm(ids, desc="Exporting full-pipeline voxels"):
         mesh_out_path = mesh_dir / f"{sample_id}.ply"
         voxel_out_path = voxel_dir / f"{sample_id}.ply"
-        if args.skip_existing and voxel_out_path.exists():
+        if args.skip_existing and mesh_out_path.exists() and voxel_out_path.exists():
             continue
 
         image_path = args.dataset_dir / "renders_cond" / sample_id / f"{args.view_index:03d}.png"

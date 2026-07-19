@@ -35,7 +35,7 @@
     "dataset": {
         "name": "ImageConditionedSLat",
         "args": {
-            "latent_model": "dinov2_vitl14_reg_slat_enc_swin8_B_64l8_fp16",
+            "latent_model": "dinov2_vitl14_reg_slat_enc_swin8_B_64l8_fp16_internal_v1",
             "min_aesthetic_score": 0.0,
             "max_num_voxels": 32768,
             "image_size": 518,

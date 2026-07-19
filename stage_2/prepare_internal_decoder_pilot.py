@@ -71,6 +71,22 @@ def validate_renders(render_dir: Path) -> None:
             raise FileNotFoundError(f"Render frame not found: {render_dir / str(file_path)}")
 
 
+def validate_conditioning_renders(render_dir: Path) -> None:
+    transforms_path = render_dir / "transforms.json"
+    if not transforms_path.is_file():
+        raise FileNotFoundError(f"Conditioning-render metadata not found: {transforms_path}")
+    with transforms_path.open(encoding="utf-8") as file:
+        frames = json.load(file).get("frames", [])
+    if not frames:
+        raise ValueError(f"No conditioning renders listed in {transforms_path}")
+    for frame in frames:
+        file_path = frame.get("file_path")
+        if not file_path or not (render_dir / file_path).is_file():
+            raise FileNotFoundError(
+                f"Conditioning render not found: {render_dir / str(file_path)}"
+            )
+
+
 def ensure_symlink(path: Path, target: Path) -> None:
     target = target.resolve()
     if path.is_symlink():
@@ -118,6 +134,7 @@ def main() -> None:
         by_category[category].append(sample_id)
         validate_latent(data_dir / "latents" / args.latent_name / f"{sample_id}.npz")
         validate_renders(data_dir / "renders" / sample_id)
+        validate_conditioning_renders(data_dir / "renders_cond" / sample_id)
 
     wrong_counts = {category: len(ids) for category, ids in by_category.items() if len(ids) != 5}
     if wrong_counts:
@@ -130,6 +147,7 @@ def main() -> None:
     training_root = args.output_dir / "train"
     training_root.mkdir(parents=True, exist_ok=True)
     ensure_symlink(training_root / "renders", data_dir / "renders")
+    ensure_symlink(training_root / "renders_cond", data_dir / "renders_cond")
     ensure_symlink(training_root / "latents", data_dir / "latents")
 
     latent_column = f"latent_{args.latent_name}"
