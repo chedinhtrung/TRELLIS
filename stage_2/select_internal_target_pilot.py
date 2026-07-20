@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select a small, deterministic, category-balanced training pilot."""
+"""Select a deterministic category-balanced pilot, or every metadata row."""
 
 import argparse
 import csv
@@ -22,13 +22,24 @@ def main() -> None:
     parser.add_argument("--max-num-voxels", type=int, default=32768)
     args = parser.parse_args()
 
-    if args.per_category <= 0:
-        parser.error("--per-category must be positive")
+    if args.per_category < 0:
+        parser.error("--per-category cannot be negative")
     if args.max_num_voxels <= 0:
         parser.error("--max-num-voxels must be positive")
 
     with args.metadata.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
+
+    if args.per_category == 0:
+        ids = [str(row.get("sha256", "")).strip() for row in rows]
+        if not ids or any(not sample_id for sample_id in ids):
+            raise ValueError("Metadata contains no samples or an empty sha256")
+        if len(ids) != len(set(ids)):
+            raise ValueError("Metadata IDs are not unique")
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text("\n".join(ids) + "\n", encoding="utf-8")
+        print(f"Wrote all {len(ids)} metadata IDs to {args.output}")
+        return
 
     selected: dict[str, list[str]] = {category: [] for category in CATEGORIES}
     for row in rows:
