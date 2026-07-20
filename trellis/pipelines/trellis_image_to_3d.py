@@ -253,6 +253,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         cond: dict,
         coords: torch.Tensor,
         sampler_params: dict = {},
+        noise_feats: Optional[torch.Tensor] = None,
     ) -> sp.SparseTensor:
         """
         Sample structured latent with the given conditioning.
@@ -261,13 +262,21 @@ class TrellisImageTo3DPipeline(Pipeline):
             cond (dict): The conditioning information.
             coords (torch.Tensor): The coordinates of the sparse structure.
             sampler_params (dict): Additional parameters for the sampler.
+            noise_feats (torch.Tensor): Optional initial noise with shape [N, C].
         """
         # Stage 2: sample SLAT features only at the coordinates from Stage 1.
         # The sparse tensor has feats [num_occupied_voxels, C_l] and coords
         # [num_occupied_voxels, 4] storing (batch, x, y, z).
         flow_model = self.models['slat_flow_model']
+        if noise_feats is None:
+            noise_feats = torch.randn(coords.shape[0], flow_model.in_channels).to(self.device)
+        elif noise_feats.shape != (coords.shape[0], flow_model.in_channels):
+            raise ValueError(
+                f"Expected SLAT noise shape {(coords.shape[0], flow_model.in_channels)}, "
+                f"got {tuple(noise_feats.shape)}"
+            )
         noise = sp.SparseTensor(
-            feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
+            feats=noise_feats.to(self.device),
             coords=coords,
         )
         sampler_params = {**self.slat_sampler_params, **sampler_params}

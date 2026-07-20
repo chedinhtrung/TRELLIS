@@ -33,6 +33,61 @@ def read_ids_file(path: Path, dataset_ids: list[str]) -> list[str]:
     return ids
 
 
+def read_gt_coords(path: Path, resolution: int) -> np.ndarray:
+    if not path.is_file():
+        raise FileNotFoundError(f"GT SLAT latent not found: {path}")
+    with np.load(path, allow_pickle=False) as data:
+        if "coords" not in data:
+            raise ValueError(f"GT SLAT latent has no 'coords' array: {path}")
+        coords = np.asarray(data["coords"])
+
+    if coords.ndim != 2 or coords.shape[1] != 3 or len(coords) == 0:
+        raise ValueError(f"Expected non-empty GT coordinates with shape [N, 3], got {coords.shape}: {path}")
+    if not np.issubdtype(coords.dtype, np.integer):
+        raise ValueError(f"GT coordinates must have an integer dtype, got {coords.dtype}: {path}")
+
+    coords = coords.astype(np.int32, copy=False)
+    if coords.min() < 0 or coords.max() >= resolution:
+        raise ValueError(f"GT coordinates fall outside [0, {resolution - 1}]: {path}")
+    if len(np.unique(coords, axis=0)) != len(coords):
+        raise ValueError(f"GT coordinates contain duplicates: {path}")
+    return coords
+
+
+def add_batch_column(coords: np.ndarray, device: torch.device) -> torch.Tensor:
+    batched = np.concatenate(
+        [np.zeros((len(coords), 1), dtype=np.int32), coords],
+        axis=1,
+    )
+    return torch.from_numpy(batched).to(device=device).contiguous()
+
+
+def coordinate_noise(
+    coords: torch.Tensor,
+    channels: int,
+    resolution: int,
+    seed: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if coords.ndim != 2 or coords.shape[1] != 4 or torch.any(coords[:, 0] != 0):
+        raise ValueError("Coordinate-controlled SLAT noise requires one sample with [N, 4] coordinates")
+    xyz = coords[:, 1:].long()
+    if torch.any(xyz < 0) or torch.any(xyz >= resolution):
+        raise ValueError(f"SLAT coordinates fall outside [0, {resolution - 1}]")
+
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
+    field = torch.randn(
+        resolution,
+        resolution,
+        resolution,
+        channels,
+        generator=generator,
+        device=device,
+    )
+    return field[xyz[:, 0], xyz[:, 1], xyz[:, 2]]
+
+
 def _load_model_cfg_from_run(ckpt_path: Path, model_key: str) -> dict:
     """Load and validate LoRA hyperparameters from the checkpoint's run config."""
     config_path = ckpt_path.parents[1] / "config.json"
@@ -131,6 +186,21 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--ids-file", type=Path, default=None, help="Optional text file containing one sample ID per line")
     parser.add_argument("--view-index", type=int, default=0, help="Numeric renders_cond view index to use")
+    parser.add_argument(
+        "--gt-coords-latent-name",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Bypass sparse-structure sampling and load GT coordinates from "
+            "latents/NAME/<sample_id>.npz. Only coordinates are loaded; SLAT features are still generated."
+        ),
+    )
+    parser.add_argument(
+        "--slat-seed",
+        type=int,
+        default=None,
+        help="Optional seed for coordinate-indexed SLAT noise used in controlled comparisons",
+    )
     parser.add_argument("--skip-existing", action="store_true")
     args = parser.parse_args()
 
@@ -149,6 +219,29 @@ def main() -> None:
         ids = ids[:args.limit]
     if args.view_index < 0:
         raise ValueError("--view-index must be non-negative")
+    if args.seed < 0 or (args.slat_seed is not None and args.slat_seed < 0):
+        raise ValueError("--seed and --slat-seed must be non-negative")
+
+    image_paths = {
+        sample_id: args.dataset_dir / "renders_cond" / sample_id / f"{args.view_index:03d}.png"
+        for sample_id in ids
+    }
+    for image_path in image_paths.values():
+        if not image_path.is_file():
+            raise FileNotFoundError(f"Conditioning render not found: {image_path}")
+
+    gt_coords = None
+    if args.gt_coords_latent_name is not None:
+        latent_dir = args.dataset_dir / "latents" / args.gt_coords_latent_name
+        gt_coords = {
+            sample_id: read_gt_coords(latent_dir / f"{sample_id}.npz", args.resolution)
+            for sample_id in ids
+        }
+        print(f"Using GT coordinates from {latent_dir}; sparse-structure sampling is disabled")
+
+    for checkpoint in (args.ss_lora_ckpt, args.slat_lora_ckpt, args.decoder_lora_ckpt):
+        if checkpoint is not None and not checkpoint.is_file():
+            raise FileNotFoundError(f"LoRA checkpoint not found: {checkpoint}")
 
     from trellis.pipelines import TrellisImageTo3DPipeline
 
@@ -184,17 +277,26 @@ def main() -> None:
         if args.skip_existing and mesh_out_path.exists() and voxel_out_path.exists():
             continue
 
-        image_path = args.dataset_dir / "renders_cond" / sample_id / f"{args.view_index:03d}.png"
-        if not image_path.exists():
-            raise FileNotFoundError(f"Conditioning render not found: {image_path}")
-
-        with Image.open(image_path) as image, torch.inference_mode():
+        with Image.open(image_paths[sample_id]) as image, torch.inference_mode():
             torch.manual_seed(args.seed)
             image = pipeline.preprocess_image(image)
             category = [categories[sample_id]] if category_names is not None else None
             cond = pipeline.get_cond([image], category=category)
-            coords = pipeline.sample_sparse_structure(cond, num_samples=1)
-            slat = pipeline.sample_slat(cond, coords)
+            if gt_coords is None:
+                coords = pipeline.sample_sparse_structure(cond, num_samples=1)
+            else:
+                coords = add_batch_column(gt_coords[sample_id], device)
+            slat_noise = None
+            if args.slat_seed is not None:
+                flow_model = pipeline.models["slat_flow_model"]
+                slat_noise = coordinate_noise(
+                    coords,
+                    flow_model.in_channels,
+                    flow_model.resolution,
+                    args.slat_seed,
+                    device,
+                )
+            slat = pipeline.sample_slat(cond, coords, noise_feats=slat_noise)
             mesh = pipeline.decode_slat(slat, formats=["mesh"])["mesh"][0]
 
         utils3d.io.write_ply(mesh_out_path, mesh.vertices.detach().cpu().numpy(), mesh.faces.detach().cpu().numpy())
