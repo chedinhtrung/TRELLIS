@@ -76,10 +76,11 @@ class BasicTrainer(Trainer):
         lines.append(f'  - FP16 mode: {self.fp16_mode}')
         return '\n'.join(lines)
             
-    def init_models_and_more(self, **kwargs):
+    def init_models_and_more(self, adapter_only_checkpoints=False, **kwargs):
         """
         Initialize models and more.
         """
+        self.adapter_only_checkpoints = bool(adapter_only_checkpoints)
         if self.world_size > 1:
             # Prepare distributed data parallel
             self.training_models = {
@@ -229,6 +230,20 @@ class BasicTrainer(Trainer):
         Should be called only by the rank 0 process.
         """
         assert self.is_master, 'save() should be called only by the rank 0 process.'
+
+        if self.adapter_only_checkpoints:
+            suffix = 'final' if final else f'step{self.step:07d}'
+            print(f'\nSaving adapter checkpoint {suffix}...', end='')
+            for name, model in self.models.items():
+                if not has_lora(model):
+                    raise RuntimeError('adapter_only_checkpoints requires a LoRA-enabled model')
+                torch.save(
+                    lora_state_dict(model),
+                    os.path.join(self.output_dir, 'ckpts', f'{name}_lora_{suffix}.pt'),
+                )
+            print(' Done.')
+            return
+
         misc_path = os.path.join(self.output_dir, 'ckpts', f'misc_step{self.step:07d}.pt')
         checkpoint_exists = os.path.exists(misc_path)
         if not (final and checkpoint_exists):

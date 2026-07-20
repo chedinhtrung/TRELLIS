@@ -3,13 +3,14 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRAIN_DIR="${TRAIN_DIR:-$REPO_ROOT/datasets/ShapeNetTRELLIS_full/train}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/results/ss_coordinate_head}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/results/ss_coordinate_head_v2/model}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 EPOCHS="${EPOCHS:-3}"
-RESUME="${RESUME:-0}"
+I_SAVE="${I_SAVE:-780}"
 
 CONFIG="$REPO_ROOT/configs/finetune/ss_flow_img_shapenet_coordinate_head.json"
 OBJECTIVE1_SS_CKPT="$REPO_ROOT/results/objective1_full/ss_flow/ckpts/denoiser_lora_final.pt"
+CACHE_DIR="$TRAIN_DIR/ss_latents/o1_generated_view0_seed42"
 
 export ATTN_BACKEND="${ATTN_BACKEND:-sdpa}"
 export SPARSE_ATTN_BACKEND="${SPARSE_ATTN_BACKEND:-sdpa}"
@@ -23,26 +24,31 @@ for path in \
     "$TRAIN_DIR/metadata.csv" \
     "$TRAIN_DIR/voxels" \
     "$TRAIN_DIR/renders_cond" \
-    "$TRAIN_DIR/ss_latents/ss_enc_conv3d_16l8_fp16"; do
+    "$CACHE_DIR/cache_config.json"; do
     if [[ ! -e "$path" ]]; then
         echo "Required input not found: $path" >&2
         exit 1
     fi
 done
 
-if [[ "$RESUME" == "1" ]]; then
-    if [[ ! -d "$OUTPUT_DIR/ckpts" ]] || [[ -z "$(find "$OUTPUT_DIR/ckpts" -name 'misc_step*.pt' -print -quit)" ]]; then
-        echo "No resumable checkpoint found under: $OUTPUT_DIR/ckpts" >&2
-        exit 1
-    fi
-    CKPT="latest"
-else
-    if [[ -d "$OUTPUT_DIR" ]] && [[ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit)" ]]; then
-        echo "Output directory is not empty: $OUTPUT_DIR" >&2
-        echo "Use a fresh OUTPUT_DIR, or set RESUME=1 to continue this run." >&2
-        exit 1
-    fi
-    CKPT="none"
+if [[ -d "$OUTPUT_DIR" ]] && [[ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit)" ]]; then
+    echo "Output directory is not empty: $OUTPUT_DIR" >&2
+    echo "Use a fresh OUTPUT_DIR. This head-only run intentionally saves adapter-only checkpoints." >&2
+    exit 1
+fi
+
+echo "Validating the complete Objective-1 endpoint cache before training"
+"$PYTHON_BIN" "$REPO_ROOT/stage_2/cache_ss_coordinate_endpoints.py" \
+    --dataset-dir "$TRAIN_DIR" \
+    --ss-lora-ckpt "$OBJECTIVE1_SS_CKPT" \
+    --latent-name o1_generated_view0_seed42 \
+    --view-index 0 \
+    --seed 42 \
+    --skip-existing
+
+if [[ ! -f "$CACHE_DIR/cache_complete.json" ]]; then
+    echo "Endpoint cache did not complete: $CACHE_DIR/cache_complete.json" >&2
+    exit 1
 fi
 
 cd "$REPO_ROOT"
@@ -51,7 +57,7 @@ cd "$REPO_ROOT"
     --data_dir "$TRAIN_DIR" \
     --output_dir "$OUTPUT_DIR" \
     --epochs "$EPOCHS" \
-    --i_save 250 \
+    --i_save "$I_SAVE" \
     --num_gpus 1 \
-    --ckpt "$CKPT" \
+    --ckpt none \
     --auto_retry 0

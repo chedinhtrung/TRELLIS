@@ -179,12 +179,24 @@ def build_model(model_cfg):
     if coordinate_head_cfg is not None:
         if not hasattr(model, 'enable_coordinate_head'):
             raise ValueError(f'{model.__class__.__name__} does not support a coordinate head')
+        if coordinate_head_cfg.get('freeze_backbone', False):
+            for parameter in model.parameters():
+                parameter.requires_grad_(False)
         model.enable_coordinate_head(
             hidden_channels=coordinate_head_cfg.get('hidden_channels', 64),
             output_resolution=coordinate_head_cfg.get('output_resolution', 64),
+            residual_scale=coordinate_head_cfg.get('residual_scale', 20.0),
+            base_logit_clip=coordinate_head_cfg.get('base_logit_clip', 10.0),
         )
+        trainable_names = [
+            name for name, parameter in model.named_parameters() if parameter.requires_grad
+        ]
+        if coordinate_head_cfg.get('freeze_backbone', False) and any(
+            not name.startswith('coordinate_head.') for name in trainable_names
+        ):
+            raise RuntimeError('Coordinate-head-only training left backbone parameters trainable')
         trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-        print(f'Enabled coordinate head: {trainable} total trainable parameters')
+        print(f'Enabled coordinate head: {trainable} trainable parameters')
 
     interior_expert_cfg = model_cfg.get('interior_expert', None)
     if interior_expert_cfg is not None:

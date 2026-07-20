@@ -26,16 +26,21 @@
             "init_lora_ckpt": "results/objective1_full/ss_flow/ckpts/denoiser_lora_final.pt",
             "coordinate_head": {
                 "hidden_channels": 64,
-                "output_resolution": 64
+                "output_resolution": 64,
+                "residual_scale": 20.0,
+                "base_logit_clip": 10.0,
+                "freeze_backbone": true
             }
         }
     },
     "dataset": {
         "name": "ImageConditionedSparseStructureLatent",
         "args": {
-            "latent_model": "ss_enc_conv3d_16l8_fp16",
+            "latent_model": "o1_generated_view0_seed42",
             "min_aesthetic_score": 0.0,
             "image_size": 518,
+            "view_index": 0,
+            "pipeline_preprocessing": true,
             "pretrained_ss_dec": "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16",
             "load_occupancy": true,
             "occupancy_resolution": 64,
@@ -52,10 +57,10 @@
                 "name": "AdamW",
                 "args": {
                     "lr": 0.0001,
-                    "weight_decay": 0.0
+                    "weight_decay": 0.0001
                 }
             },
-            "ema_rate": [0.9999],
+            "ema_rate": [],
             "fp16_mode": "inflat_all",
             "fp16_scale_growth": 0.001,
             "grad_clip": {
@@ -67,26 +72,19 @@
             },
             "i_log": 100,
             "i_print": 10,
-            "i_sample": 10000,
+            "i_sample": 0,
             "snapshot_num_samples": 5,
             "i_save": 250,
             "sample_at_start": false,
             "sample_at_end": false,
-            "p_uncond": 0.1,
-            "t_schedule": {
-                "name": "logitNormal",
-                "args": {
-                    "mean": 1.0,
-                    "std": 1.0
-                }
-            },
-            "sigma_min": 0.00001,
+            "p_uncond": 0.0,
             "image_cond_model": "dinov2_vitl14_reg",
             "pretrained_ss_decoder": "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16",
-            "coordinate_loss_weight": 0.1,
-            "empty_loss_weight": 0.4,
-            "exterior_loss_weight": 0.2,
-            "interior_loss_weight": 0.4
+            "empty_loss_weight": 1.0,
+            "exterior_loss_weight": 2.0,
+            "interior_loss_weight": 4.0,
+            "interior_aux_weight": 0.1,
+            "adapter_only_checkpoints": true
         }
     }
 }

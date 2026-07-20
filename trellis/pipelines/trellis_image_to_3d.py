@@ -10,6 +10,7 @@ import rembg
 from .base import Pipeline
 from . import samplers
 from ..modules import sparse as sp
+from ..utils.image_utils import preprocess_rgba_image
 
 
 class TrellisImageTo3DPipeline(Pipeline):
@@ -104,7 +105,7 @@ class TrellisImageTo3DPipeline(Pipeline):
             if not np.all(alpha == 255):
                 has_alpha = True
         if has_alpha:
-            output = input
+            output = input.convert('RGBA')
         else:
             input = input.convert('RGB')
             max_size = max(input.size)
@@ -114,20 +115,7 @@ class TrellisImageTo3DPipeline(Pipeline):
             if getattr(self, 'rembg_session', None) is None:
                 self.rembg_session = rembg.new_session('u2net')
             output = rembg.remove(input, session=self.rembg_session)
-        output_np = np.array(output)
-        alpha = output_np[:, :, 3]
-        bbox = np.argwhere(alpha > 0.8 * 255)
-        bbox = np.min(bbox[:, 1]), np.min(bbox[:, 0]), np.max(bbox[:, 1]), np.max(bbox[:, 0])
-        center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
-        size = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
-        size = int(size * 1.2)
-        bbox = center[0] - size // 2, center[1] - size // 2, center[0] + size // 2, center[1] + size // 2
-        output = output.crop(bbox)  # type: ignore
-        output = output.resize((518, 518), Image.Resampling.LANCZOS)
-        output = np.array(output).astype(np.float32) / 255
-        output = output[:, :, :3] * output[:, :, 3:4]
-        output = Image.fromarray((output * 255).astype(np.uint8))
-        return output
+        return preprocess_rgba_image(output.convert('RGBA'), 518)
 
     @torch.no_grad()
     def encode_image(self, image: Union[torch.Tensor, list[Image.Image]]) -> torch.Tensor:
@@ -186,35 +174,33 @@ class TrellisImageTo3DPipeline(Pipeline):
             conditioning['category'] = category
         return conditioning
 
-    def sample_sparse_structure(
+    def sample_sparse_structure_latent(
         self,
         cond: dict,
         num_samples: int = 1,
         sampler_params: dict = {},
     ) -> torch.Tensor:
-        """
-        Sample sparse structures with the given conditioning.
-        
-        Args:
-            cond (dict): The conditioning information.
-            num_samples (int): The number of samples to generate.
-            sampler_params (dict): Additional parameters for the sampler.
-        """
-        # Stage 1: sample a dense latent grid for occupancy/structure. Shape is
-        # [num_samples, C_s, R, R, R], where R is the structure latent resolution.
-        # The flow model predicts velocity while cross-attending to image tokens.
+        """Sample and return the dense Stage-1 endpoint latent ``z_s``."""
         flow_model = self.models['sparse_structure_flow_model']
         reso = flow_model.resolution
         noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
-        z_s = self.sparse_structure_sampler.sample(
+        return self.sparse_structure_sampler.sample(
             flow_model,
             noise,
             **cond,
             **sampler_params,
             verbose=True
         ).samples
-        
+
+    def decode_sparse_structure(
+        self,
+        z_s: torch.Tensor,
+        cond: dict,
+        coordinate_threshold: float = 0.0,
+    ) -> torch.Tensor:
+        """Decode a dense Stage-1 endpoint into sparse voxel coordinates."""
+        flow_model = self.models['sparse_structure_flow_model']
         # The structure VAE decoder maps the dense latent to occupancy logits.
         # Thresholding at 0 creates sparse voxel coordinates. The decoder output is
         # [B, 1, X, Y, Z], so argwhere returns (batch, channel, x, y, z); the channel
@@ -229,15 +215,28 @@ class TrellisImageTo3DPipeline(Pipeline):
                 raise ValueError(
                     'Coordinate-head inference requires one conditioning image per sample'
                 )
-            _, coordinate_residual = flow_model(
+            _, structure_logits = flow_model(
                 z_s,
                 torch.zeros(z_s.shape[0], device=z_s.device, dtype=torch.float32),
                 head_cond,
                 category=cond.get('category'),
                 return_coordinate_head=True,
+                base_logits=structure_logits,
             )
-            structure_logits = structure_logits + coordinate_residual
-        coords = torch.argwhere(structure_logits > 0)[:, [0, 2, 3, 4]].int()
+        coords = torch.argwhere(structure_logits > coordinate_threshold)[:, [0, 2, 3, 4]].int()
+
+        return coords
+
+    def sample_sparse_structure(
+        self,
+        cond: dict,
+        num_samples: int = 1,
+        sampler_params: dict = {},
+        coordinate_threshold: float = 0.0,
+    ) -> torch.Tensor:
+        """Sample a Stage-1 latent and decode it into sparse voxel coordinates."""
+        z_s = self.sample_sparse_structure_latent(cond, num_samples, sampler_params)
+        coords = self.decode_sparse_structure(z_s, cond, coordinate_threshold)
 
         return coords
 

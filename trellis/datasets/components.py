@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 from torch.utils.data import Dataset
+from ..utils.image_utils import preprocess_rgba_image
 
 
 class StandardDatasetBase(Dataset):
@@ -90,8 +91,20 @@ class TextConditionedMixin:
     
     
 class ImageConditionedMixin:
-    def __init__(self, roots, *, image_size=518, **kwargs):
+    def __init__(
+        self,
+        roots,
+        *,
+        image_size=518,
+        view_index=None,
+        pipeline_preprocessing=False,
+        **kwargs,
+    ):
         self.image_size = image_size
+        self.view_index = view_index
+        self.pipeline_preprocessing = pipeline_preprocessing
+        if self.view_index is not None and self.view_index < 0:
+            raise ValueError('view_index must be non-negative')
         super().__init__(roots, **kwargs)
     
     def filter_metadata(self, metadata):
@@ -107,11 +120,22 @@ class ImageConditionedMixin:
         with open(os.path.join(image_root, 'transforms.json')) as f:
             metadata = json.load(f)
         n_views = len(metadata['frames'])
-        view = np.random.randint(n_views)
+        view = np.random.randint(n_views) if self.view_index is None else self.view_index
+        if view >= n_views:
+            raise ValueError(
+                f'view_index {view} is out of range for {instance}, which has {n_views} views'
+            )
         metadata = metadata['frames'][view]
 
         image_path = os.path.join(image_root, metadata['file_path'])
-        image = Image.open(image_path)
+        image = Image.open(image_path).convert('RGBA')
+
+        if self.pipeline_preprocessing:
+            image = preprocess_rgba_image(image, self.image_size)
+            image = torch.tensor(np.array(image)).permute(2, 0, 1).float() / 255.0
+            pack['cond'] = image
+            pack['category'] = str(self.metadata.loc[instance]['category'])
+            return pack
 
         alpha = np.array(image.getchannel(3))
         bbox = np.array(alpha).nonzero()

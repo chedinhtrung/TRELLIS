@@ -4,15 +4,17 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_DIR="${TEST_DIR:-$REPO_ROOT/datasets/ShapeNetTRELLIS_full/test}"
 OBJECTIVE1_DIR="${OBJECTIVE1_DIR:-$REPO_ROOT/results/objective1_full}"
-COORDINATE_HEAD_DIR="${COORDINATE_HEAD_DIR:-$REPO_ROOT/results/ss_coordinate_head}"
-OUTPUT_DIR="${OUTPUT_DIR:-$COORDINATE_HEAD_DIR/eval_test}"
+COORDINATE_HEAD_DIR="${COORDINATE_HEAD_DIR:-$REPO_ROOT/results/ss_coordinate_head_v2/model}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/results/ss_coordinate_head_v2/eval_test}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 SAMPLES_PER_CATEGORY="${SAMPLES_PER_CATEGORY:-5}"
-SEED="${SEED:-42}"
+SEED=42
 RESUME="${RESUME:-0}"
 
 BASE_SS_CKPT="$OBJECTIVE1_DIR/ss_flow/ckpts/denoiser_lora_final.pt"
-HEAD_SS_CKPT="$COORDINATE_HEAD_DIR/ckpts/denoiser_lora_final.pt"
+HEAD_SS_CKPT="$COORDINATE_HEAD_DIR/ckpts/denoiser_lora_best.pt"
+THRESHOLD_FILE="$COORDINATE_HEAD_DIR/coordinate_threshold.txt"
+BASE_THRESHOLD_FILE="$COORDINATE_HEAD_DIR/objective1_threshold.txt"
 SLAT_CKPT="$OBJECTIVE1_DIR/slat_flow/ckpts/denoiser_lora_final.pt"
 DECODER_CKPT="$OBJECTIVE1_DIR/decoder/ckpts/decoder_lora_final.pt"
 IDS_FILE="$OUTPUT_DIR/selected_ids.txt"
@@ -38,6 +40,8 @@ for path in \
     "$COORDINATE_HEAD_DIR/config.json" \
     "$BASE_SS_CKPT" \
     "$HEAD_SS_CKPT" \
+    "$THRESHOLD_FILE" \
+    "$BASE_THRESHOLD_FILE" \
     "$SLAT_CKPT" \
     "$DECODER_CKPT"; do
     if [[ ! -e "$path" ]]; then
@@ -45,6 +49,17 @@ for path in \
         exit 1
     fi
 done
+
+IFS= read -r COORDINATE_THRESHOLD < "$THRESHOLD_FILE"
+IFS= read -r OBJECTIVE1_THRESHOLD < "$BASE_THRESHOLD_FILE"
+if [[ -z "$COORDINATE_THRESHOLD" ]]; then
+    echo "Coordinate threshold is empty: $THRESHOLD_FILE" >&2
+    exit 1
+fi
+if [[ -z "$OBJECTIVE1_THRESHOLD" ]]; then
+    echo "Objective-1 threshold is empty: $BASE_THRESHOLD_FILE" >&2
+    exit 1
+fi
 
 if [[ -d "$OUTPUT_DIR" ]] && [[ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit)" ]] && [[ "$RESUME" != "1" ]]; then
     echo "Output directory is not empty: $OUTPUT_DIR" >&2
@@ -67,7 +82,7 @@ while IFS= read -r sample_id; do
     [[ -n "$sample_id" ]] || continue
     for path in \
         "$TEST_DIR/renders/$sample_id/mesh.ply" \
-        "$TEST_DIR/renders_cond/$sample_id/000.png" \
+        "$TEST_DIR/renders_cond/$sample_id/transforms.json" \
         "$TEST_DIR/voxels/$sample_id.ply"; do
         if [[ ! -f "$path" ]]; then
             echo "Selected sample is incomplete: $path" >&2
@@ -79,6 +94,7 @@ done < "$IDS_FILE"
 generate() {
     local method="$1"
     local ss_ckpt="$2"
+    local coordinate_threshold="$3"
     "$PYTHON_BIN" stage_2/export_full_pipeline_voxels.py \
         --dataset-dir "$TEST_DIR" \
         --output-dir "$PRED_ROOT/$method/seed_$SEED" \
@@ -86,17 +102,18 @@ generate() {
         --view-index 0 \
         --seed "$SEED" \
         --slat-seed "$SEED" \
+        --coordinate-threshold "$coordinate_threshold" \
         --ss-lora-ckpt "$ss_ckpt" \
         --slat-lora-ckpt "$SLAT_CKPT" \
         --decoder-lora-ckpt "$DECODER_CKPT" \
         --skip-existing
 }
 
-echo "[2/7] Generating Objective-1 baseline"
-generate objective1 "$BASE_SS_CKPT"
+echo "[2/7] Generating calibrated Objective-1 baseline (threshold=$OBJECTIVE1_THRESHOLD)"
+generate objective1 "$BASE_SS_CKPT" "$OBJECTIVE1_THRESHOLD"
 
-echo "[3/7] Generating decoder-aware coordinate-head model"
-generate coordinate_head "$HEAD_SS_CKPT"
+echo "[3/7] Generating corrected coordinate-head model (threshold=$COORDINATE_THRESHOLD)"
+generate coordinate_head "$HEAD_SS_CKPT" "$COORDINATE_THRESHOLD"
 
 METHODS=(objective1 coordinate_head)
 

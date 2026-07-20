@@ -24,6 +24,15 @@ def read_categories(metadata_path: Path) -> dict[str, str]:
         return {row["sha256"]: row["category"] for row in csv.DictReader(f)}
 
 
+def conditioning_image_path(dataset_dir: Path, sample_id: str, view_index: int) -> Path:
+    render_dir = dataset_dir / "renders_cond" / sample_id
+    with (render_dir / "transforms.json").open("r", encoding="utf-8") as f:
+        frames = json.load(f)["frames"]
+    if view_index >= len(frames):
+        raise ValueError(f"View {view_index} is unavailable for {sample_id}")
+    return render_dir / frames[view_index]["file_path"]
+
+
 def read_ids_file(path: Path, dataset_ids: list[str]) -> list[str]:
     ids = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     unknown = sorted(set(ids) - set(dataset_ids))
@@ -72,6 +81,8 @@ def load_ss_lora(pipeline, ckpt_path: Path):
         model.enable_coordinate_head(
             hidden_channels=coordinate_head_cfg.get("hidden_channels", 64),
             output_resolution=coordinate_head_cfg.get("output_resolution", 64),
+            residual_scale=coordinate_head_cfg.get("residual_scale", 20.0),
+            base_logit_clip=coordinate_head_cfg.get("base_logit_clip", 10.0),
         )
 
     state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
@@ -115,6 +126,12 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--ids-file", type=Path, default=None, help="Optional text file containing one sample ID per line")
     parser.add_argument("--view-index", type=int, default=0, help="Numeric renders_cond view index to use")
+    parser.add_argument(
+        "--coordinate-threshold",
+        type=float,
+        default=0.0,
+        help="Threshold applied to total sparse-structure decoder logits",
+    )
     parser.add_argument("--skip-existing", action="store_true")
     args = parser.parse_args()
 
@@ -153,7 +170,7 @@ def main() -> None:
         if args.skip_existing and out_path.exists():
             continue
 
-        image_path = args.dataset_dir / "renders_cond" / sample_id / f"{args.view_index:03d}.png"
+        image_path = conditioning_image_path(args.dataset_dir, sample_id, args.view_index)
         if not image_path.exists():
             raise FileNotFoundError(f"Conditioning render not found: {image_path}")
 
@@ -162,7 +179,12 @@ def main() -> None:
             image = pipeline.preprocess_image(image)
             category = [categories[sample_id]] if category_names is not None else None
             cond = pipeline.get_cond([image], category=category)
-            coords = pipeline.sample_sparse_structure(cond, num_samples=1, sampler_params=sampler_params)
+            coords = pipeline.sample_sparse_structure(
+                cond,
+                num_samples=1,
+                sampler_params=sampler_params,
+                coordinate_threshold=args.coordinate_threshold,
+            )
 
         points = coords_to_points(coords, args.resolution)
         utils3d.io.write_ply(out_path, points)

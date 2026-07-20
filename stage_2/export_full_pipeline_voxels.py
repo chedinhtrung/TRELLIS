@@ -25,6 +25,15 @@ def read_categories(metadata_path: Path) -> dict[str, str]:
         return {row["sha256"]: row["category"] for row in csv.DictReader(f)}
 
 
+def conditioning_image_path(dataset_dir: Path, sample_id: str, view_index: int) -> Path:
+    render_dir = dataset_dir / "renders_cond" / sample_id
+    with (render_dir / "transforms.json").open("r", encoding="utf-8") as f:
+        frames = json.load(f)["frames"]
+    if view_index >= len(frames):
+        raise ValueError(f"View {view_index} is unavailable for {sample_id}")
+    return render_dir / frames[view_index]["file_path"]
+
+
 def read_ids_file(path: Path, dataset_ids: list[str]) -> list[str]:
     ids = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     unknown = sorted(set(ids) - set(dataset_ids))
@@ -129,6 +138,8 @@ def load_lora(model, ckpt_path: Path, *, model_key: str = "denoiser"):
         model.enable_coordinate_head(
             hidden_channels=coordinate_head_cfg.get("hidden_channels", 64),
             output_resolution=coordinate_head_cfg.get("output_resolution", 64),
+            residual_scale=coordinate_head_cfg.get("residual_scale", 20.0),
+            base_logit_clip=coordinate_head_cfg.get("base_logit_clip", 10.0),
         )
     interior_expert_cfg = model_cfg.get("interior_expert")
     if interior_expert_cfg is not None:
@@ -202,6 +213,12 @@ def main() -> None:
     parser.add_argument("--ids-file", type=Path, default=None, help="Optional text file containing one sample ID per line")
     parser.add_argument("--view-index", type=int, default=0, help="Numeric renders_cond view index to use")
     parser.add_argument(
+        "--coordinate-threshold",
+        type=float,
+        default=0.0,
+        help="Threshold applied to total sparse-structure decoder logits",
+    )
+    parser.add_argument(
         "--gt-coords-latent-name",
         default=None,
         metavar="NAME",
@@ -240,7 +257,7 @@ def main() -> None:
         raise ValueError("--seed and --slat-seed must be non-negative")
 
     image_paths = {
-        sample_id: args.dataset_dir / "renders_cond" / sample_id / f"{args.view_index:03d}.png"
+        sample_id: conditioning_image_path(args.dataset_dir, sample_id, args.view_index)
         for sample_id in ids
     }
     for image_path in image_paths.values():
@@ -306,7 +323,11 @@ def main() -> None:
             category = [categories[sample_id]] if category_names is not None else None
             cond = pipeline.get_cond([image], category=category)
             if gt_coords is None:
-                coords = pipeline.sample_sparse_structure(cond, num_samples=1)
+                coords = pipeline.sample_sparse_structure(
+                    cond,
+                    num_samples=1,
+                    coordinate_threshold=args.coordinate_threshold,
+                )
             else:
                 coords = add_batch_column(gt_coords[sample_id], device)
             utils3d.io.write_ply(
