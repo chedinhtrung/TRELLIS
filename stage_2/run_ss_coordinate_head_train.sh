@@ -10,7 +10,9 @@ I_SAVE="${I_SAVE:-780}"
 
 CONFIG="$REPO_ROOT/configs/finetune/ss_flow_img_shapenet_coordinate_head.json"
 OBJECTIVE1_SS_CKPT="$REPO_ROOT/results/objective1_full/ss_flow/ckpts/denoiser_lora_final.pt"
-CACHE_DIR="$TRAIN_DIR/ss_latents/o1_generated_view0_seed42"
+VIEW_INDEX=18
+LATENT_NAME="o1_generated_view18_seed42"
+CACHE_DIR="$TRAIN_DIR/ss_latents/$LATENT_NAME"
 
 export ATTN_BACKEND="${ATTN_BACKEND:-sdpa}"
 export SPARSE_ATTN_BACKEND="${SPARSE_ATTN_BACKEND:-sdpa}"
@@ -41,8 +43,8 @@ echo "Validating the complete Objective-1 endpoint cache before training"
 "$PYTHON_BIN" "$REPO_ROOT/stage_2/cache_ss_coordinate_endpoints.py" \
     --dataset-dir "$TRAIN_DIR" \
     --ss-lora-ckpt "$OBJECTIVE1_SS_CKPT" \
-    --latent-name o1_generated_view0_seed42 \
-    --view-index 0 \
+    --latent-name "$LATENT_NAME" \
+    --view-index "$VIEW_INDEX" \
     --seed 42 \
     --skip-existing
 

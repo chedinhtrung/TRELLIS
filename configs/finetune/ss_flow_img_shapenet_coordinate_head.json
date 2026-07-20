@@ -36,10 +36,10 @@
     "dataset": {
         "name": "ImageConditionedSparseStructureLatent",
         "args": {
-            "latent_model": "o1_generated_view0_seed42",
+            "latent_model": "o1_generated_view18_seed42",
             "min_aesthetic_score": 0.0,
             "image_size": 518,
-            "view_index": 0,
+            "view_index": 18,
             "pipeline_preprocessing": true,
             "pretrained_ss_dec": "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16",
             "load_occupancy": true,

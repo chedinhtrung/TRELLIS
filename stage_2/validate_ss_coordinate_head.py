@@ -115,7 +115,7 @@ def main() -> None:
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--pipeline", default="microsoft/TRELLIS-image-large")
-    parser.add_argument("--latent-name", default="o1_generated_view0_seed42")
+    parser.add_argument("--latent-name", default="o1_generated_view18_seed42")
     parser.add_argument(
         "--thresholds",
         type=float,

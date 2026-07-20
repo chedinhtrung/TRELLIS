@@ -9,6 +9,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/results/ss_coordinate_head_v2/eval_test}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 SAMPLES_PER_CATEGORY="${SAMPLES_PER_CATEGORY:-5}"
 SEED=42
+VIEW_INDEX=18
 RESUME="${RESUME:-0}"
 
 BASE_SS_CKPT="$OBJECTIVE1_DIR/ss_flow/ckpts/denoiser_lora_final.pt"
@@ -99,7 +100,7 @@ generate() {
         --dataset-dir "$TEST_DIR" \
         --output-dir "$PRED_ROOT/$method/seed_$SEED" \
         --ids-file "$IDS_FILE" \
-        --view-index 0 \
+        --view-index "$VIEW_INDEX" \
         --seed "$SEED" \
         --slat-seed "$SEED" \
         --coordinate-threshold "$coordinate_threshold" \
