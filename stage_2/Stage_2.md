@@ -119,3 +119,30 @@ Evaluate:
 ```bash
 bash stage_2/run_eval.sh
 ```
+
+## Final View-18 Consensus Completion
+
+The final postprocessor uses the Objective-1 view-18 voxel prediction as the
+exterior-preserving base. DINO retrieves the top 20 training shapes within the
+known category, and training-only leave-one-out calibration selects the voxel
+support threshold for each category. Supported canonical-frame internal voxels
+are intersected with Objective 1's conservative enclosed volume and unioned
+with Objective 1; no Objective-1 voxel is deleted.
+
+Run calibration and the frozen held-out evaluation together:
+
+```bash
+bash stage_2/run_final_consensus_view18.sh
+```
+
+The command writes:
+
+- `results/dino_consensus_calibration_view18/policy.json`: frozen train-only policy.
+- `results/final_consensus_view18/predictions/calibrated_consensus/`: all final PLYs.
+- `results/final_consensus_view18/summary.csv`: aggregate metrics at margins 1–4.
+- `results/final_consensus_view18/paired_summary.csv`: paired gains and confidence intervals.
+- `results/final_consensus_view18/visualizations/`: best, typical, and worst examples per category.
+
+After copying both result directories back, run
+`visualize_interior_comparisons.ipynb` to render synchronized half-cut triangle
+meshes for ground truth, Objective 1, and the calibrated consensus prediction.
