@@ -154,3 +154,36 @@ After copying both result directories back, run
 `visualize_interior_comparisons.ipynb`. Ground truth and both predictions use the
 same voxel-to-surface conversion and the same display-only smoothing before the
 synchronized half cut.
+
+## Retrieval v2: Reranked, Gated Hybrid Meshes
+
+Retrieval v2 fixes the remaining all-or-nothing replacement failure. A learned
+category reranker scores every DINO top-20 candidate with view-18 similarity,
+tolerant exterior fit, agreement with Objective-1 internals, and neighborhood
+medoid agreement. The selected donor receives only a small robust-extent affine
+fit. Supported donor components replace matching Objective-1 regions, while
+large surface-like Objective-1 components outside those regions are preserved.
+A separately calibrated coverage and quality gate falls back to Objective 1.
+
+The reranker and fusion policy use disjoint deterministic subsets of the 1,560
+training shapes. Held-out test labels never influence selection or gating.
+
+First cache view-18 Objective-1 predictions for the training split. This command
+can shard inference across GPUs and does not retain the large train meshes:
+
+```bash
+NUM_GPUS=4 bash stage_2/run_objective1_view18_train.sh
+```
+
+Then calibrate, evaluate, and export both 64³ voxels and smooth hybrid triangle
+meshes:
+
+```bash
+bash stage_2/run_retrieval_v2_view18.sh
+```
+
+Outputs are written to `results/retrieval_v2_calibration_view18` and
+`results/retrieval_v2_view18`. The updated
+`visualize_interior_comparisons.ipynb` shows the 15 strongest buses and 15
+strongest cars as synchronized smooth half cuts; it also contains an optional
+four-way voxel diagnostic for Objective 1, retrieval v1, and retrieval v2.

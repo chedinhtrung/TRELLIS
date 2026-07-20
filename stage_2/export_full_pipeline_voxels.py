@@ -234,6 +234,23 @@ def main() -> None:
         help="Optional seed for coordinate-indexed SLAT noise used in controlled comparisons",
     )
     parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument(
+        "--skip-mesh-write",
+        action="store_true",
+        help="Decode and voxelize the mesh but do not keep its large triangle PLY.",
+    )
+    parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Split the requested IDs across independent GPU workers.",
+    )
+    parser.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Zero-based worker index used with --num-shards.",
+    )
     args = parser.parse_args()
 
     method_dir = args.output_dir
@@ -251,6 +268,13 @@ def main() -> None:
         ids = read_ids_file(args.ids_file, ids)
     if args.limit is not None:
         ids = ids[:args.limit]
+    if args.num_shards < 1 or not 0 <= args.shard_index < args.num_shards:
+        raise ValueError("require --num-shards >= 1 and 0 <= --shard-index < --num-shards")
+    ids = ids[args.shard_index :: args.num_shards]
+    if not ids:
+        raise ValueError(
+            f"Shard {args.shard_index}/{args.num_shards} contains no sample IDs"
+        )
     if args.view_index < 0:
         raise ValueError("--view-index must be non-negative")
     if args.seed < 0 or (args.slat_seed is not None and args.slat_seed < 0):
@@ -305,13 +329,16 @@ def main() -> None:
         print(f"Applying decoder LoRA checkpoint: decoder={args.decoder_lora_ckpt}")
         load_lora(pipeline.models["slat_decoder_mesh"], args.decoder_lora_ckpt, model_key="decoder")
 
-    for sample_id in tqdm(ids, desc="Exporting full-pipeline voxels"):
+    for sample_id in tqdm(
+        ids,
+        desc=f"Exporting full-pipeline voxels shard {args.shard_index + 1}/{args.num_shards}",
+    ):
         mesh_out_path = mesh_dir / f"{sample_id}.ply"
         voxel_out_path = voxel_dir / f"{sample_id}.ply"
         structure_out_path = structure_dir / f"{sample_id}.ply"
         if (
             args.skip_existing
-            and mesh_out_path.exists()
+            and (args.skip_mesh_write or mesh_out_path.exists())
             and voxel_out_path.exists()
             and structure_out_path.exists()
         ):
@@ -347,11 +374,13 @@ def main() -> None:
             slat = pipeline.sample_slat(cond, coords, noise_feats=slat_noise)
             mesh = pipeline.decode_slat(slat, formats=["mesh"])["mesh"][0]
 
-        utils3d.io.write_ply(mesh_out_path, mesh.vertices.detach().cpu().numpy(), mesh.faces.detach().cpu().numpy())
+        if not args.skip_mesh_write:
+            utils3d.io.write_ply(mesh_out_path, mesh.vertices.detach().cpu().numpy(), mesh.faces.detach().cpu().numpy())
         points = mesh_to_voxel_points(mesh, args.resolution)
         utils3d.io.write_ply(voxel_out_path, points)
 
-    print(f"Wrote mesh PLYs to {mesh_dir}")
+    if not args.skip_mesh_write:
+        print(f"Wrote mesh PLYs to {mesh_dir}")
     print(f"Wrote voxel PLYs to {voxel_dir}")
     print(f"Wrote sparse-structure PLYs to {structure_dir}")
 
