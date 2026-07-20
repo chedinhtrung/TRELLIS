@@ -120,29 +120,37 @@ Evaluate:
 bash stage_2/run_eval.sh
 ```
 
-## Final View-18 Consensus Completion
+## Final View-18 Coherent Retrieval
 
-The final postprocessor uses the Objective-1 view-18 voxel prediction as the
-exterior-preserving base. DINO retrieves the top 20 training shapes within the
-known category, and training-only leave-one-out calibration selects the voxel
-support threshold for each category. Supported canonical-frame internal voxels
-are intersected with Objective 1's conservative enclosed volume and unioned
-with Objective 1; no Objective-1 voxel is deleted.
+The old voxel-consensus postprocessor is retained only as an experiment. It is
+not the final method: independently unioning votes from several shapes can blur
+surfaces and overfill interiors.
 
-Run calibration and the frozen held-out evaluation together:
+The corrected postprocessor chooses one DINO-retrieved training shape using
+view 18 plus Objective-1 exterior compatibility. Neighbor votes may accept or
+reject a complete connected donor surface component, but never create voxels.
+Tiny, heavily clipped, fragmented, and unsupported components are rejected.
+The Objective-1 outer shell is preserved, uncertain Objective-1 internals are
+replaced rather than accumulated, and a training-derived category budget guards
+against overfill. All policy choices are frozen with training-only leave-one-out
+calibration using a precision-weighted objective and an explicit overfill limit.
+
+Run calibration and held-out evaluation together:
 
 ```bash
-bash stage_2/run_final_consensus_view18.sh
+bash stage_2/run_coherent_retrieval_view18.sh
 ```
 
 The command writes:
 
-- `results/dino_consensus_calibration_view18/policy.json`: frozen train-only policy.
-- `results/final_consensus_view18/predictions/calibrated_consensus/`: all final PLYs.
-- `results/final_consensus_view18/summary.csv`: aggregate metrics at margins 1–4.
-- `results/final_consensus_view18/paired_summary.csv`: paired gains and confidence intervals.
-- `results/final_consensus_view18/visualizations/`: best, typical, and worst examples per category.
+- `results/coherent_retrieval_calibration_view18/policy.json`: frozen train-only policy.
+- `results/coherent_retrieval_view18/predictions/coherent_retrieval/`: all final voxel PLYs.
+- `results/coherent_retrieval_view18/summary.csv`: overlap, overfill, and topology metrics.
+- `results/coherent_retrieval_view18/paired_summary.csv`: paired F1 gains and confidence intervals.
+- `results/coherent_retrieval_view18/references/ground_truth/`: portable voxel GT for fair visualization.
+- `results/coherent_retrieval_view18/visualization_manifest.csv`: 15 best buses and 15 best cars by precision-weighted semantic improvement.
 
 After copying both result directories back, run
-`visualize_interior_comparisons.ipynb` to render synchronized half-cut triangle
-meshes for ground truth, Objective 1, and the calibrated consensus prediction.
+`visualize_interior_comparisons.ipynb`. Ground truth and both predictions use the
+same voxel-to-surface conversion and the same display-only smoothing before the
+synchronized half cut.
