@@ -67,10 +67,29 @@ def load_ss_lora(pipeline, ckpt_path: Path):
     categories = model_cfg.get("categories")
     if categories is not None:
         model.enable_category_conditioning(categories)
-    state = torch.load(ckpt_path, map_location="cpu")
+    coordinate_head_cfg = model_cfg.get("coordinate_head")
+    if coordinate_head_cfg is not None:
+        model.enable_coordinate_head(
+            hidden_channels=coordinate_head_cfg.get("hidden_channels", 64),
+            output_resolution=coordinate_head_cfg.get("output_resolution", 64),
+        )
+
+    state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    expected = {
+        key
+        for key in model.state_dict()
+        if ".lora_down" in key
+        or ".lora_up" in key
+        or key.startswith("category_embedding.")
+        or key.startswith("coordinate_head.")
+    }
+    if set(state) != expected:
+        raise RuntimeError(
+            f"Adapter checkpoint mismatch. missing={sorted(expected - set(state))}, "
+            f"unexpected={sorted(set(state) - expected)}"
+        )
     missing, unexpected = model.load_state_dict(state, strict=False)
-    unexpected = [key for key in unexpected if "lora_" in key or key.startswith("category_embedding.")]
-    missing = [key for key in missing if "lora_" in key or key.startswith("category_embedding.")]
+    missing = [key for key in missing if key in expected]
     if missing or unexpected:
         raise RuntimeError(f"LoRA checkpoint mismatch. missing={missing}, unexpected={unexpected}")
     model.eval()

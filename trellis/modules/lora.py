@@ -87,4 +87,5 @@ def lora_state_dict(model: nn.Module) -> dict:
         or ".lora_up" in name
         or name.startswith("category_embedding.")
         or name.startswith("interior_expert.")
+        or name.startswith("coordinate_head.")
     }

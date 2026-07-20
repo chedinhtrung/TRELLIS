@@ -135,6 +135,8 @@ class SparseStructureFlowModel(CategoryConditioningMixin, nn.Module):
         ])
 
         self.out_layer = nn.Linear(model_channels, out_channels * patch_size**3)
+        self.coordinate_head = None
+        self.coordinate_head_output_resolution = None
 
         self.initialize_weights()
         if use_fp16:
@@ -185,7 +187,52 @@ class SparseStructureFlowModel(CategoryConditioningMixin, nn.Module):
         nn.init.constant_(self.out_layer.weight, 0)
         nn.init.constant_(self.out_layer.bias, 0)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor, category=None) -> torch.Tensor:
+    def enable_coordinate_head(
+        self,
+        hidden_channels: int = 64,
+        output_resolution: int = 64,
+    ) -> None:
+        """Add a zero-initialized 64^3 occupancy-logit residual head."""
+        if self.coordinate_head is not None:
+            raise RuntimeError("Coordinate head is already enabled")
+        if hidden_channels < 4:
+            raise ValueError("hidden_channels must be at least 4")
+
+        token_resolution = self.resolution // self.patch_size
+        if output_resolution != token_resolution * 4:
+            raise ValueError(
+                "Coordinate head expects output_resolution to be four times the "
+                f"token resolution, got {output_resolution} and {token_resolution}"
+            )
+
+        half_channels = hidden_channels // 2
+        quarter_channels = hidden_channels // 4
+        head = nn.Sequential(
+            nn.Conv3d(self.model_channels, hidden_channels, 1),
+            nn.SiLU(),
+            nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False),
+            nn.Conv3d(hidden_channels, half_channels, 3, padding=1),
+            nn.SiLU(),
+            nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False),
+            nn.Conv3d(half_channels, quarter_channels, 3, padding=1),
+            nn.SiLU(),
+            nn.Conv3d(quarter_channels, 1, 1),
+        )
+        nn.init.zeros_(head[-1].weight)
+        nn.init.zeros_(head[-1].bias)
+
+        reference = next(self.out_layer.parameters())
+        self.coordinate_head = head.to(device=reference.device, dtype=reference.dtype)
+        self.coordinate_head_output_resolution = int(output_resolution)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        cond: torch.Tensor,
+        category=None,
+        return_coordinate_head: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Predict rectified-flow velocity for a dense structure latent.
 
@@ -219,6 +266,29 @@ class SparseStructureFlowModel(CategoryConditioningMixin, nn.Module):
             h = block(h, t_emb, cond)
         h = h.type(x.dtype)
         h = F.layer_norm(h, h.shape[-1:])
+
+        coordinate_residual = None
+        if return_coordinate_head:
+            if self.coordinate_head is None:
+                raise RuntimeError("Coordinate-head output requested, but the head is not enabled")
+            token_resolution = self.resolution // self.patch_size
+            h_grid = h.permute(0, 2, 1).reshape(
+                h.shape[0], self.model_channels, token_resolution, token_resolution, token_resolution
+            )
+            coordinate_residual = self.coordinate_head(h_grid)
+            expected_shape = (
+                h.shape[0],
+                1,
+                self.coordinate_head_output_resolution,
+                self.coordinate_head_output_resolution,
+                self.coordinate_head_output_resolution,
+            )
+            if coordinate_residual.shape != expected_shape:
+                raise RuntimeError(
+                    f"Coordinate head returned {tuple(coordinate_residual.shape)}, "
+                    f"expected {expected_shape}"
+                )
+
         h = self.out_layer(h)
 
         # Convert token predictions back to a dense 3D grid matching the input
@@ -226,4 +296,6 @@ class SparseStructureFlowModel(CategoryConditioningMixin, nn.Module):
         h = h.permute(0, 2, 1).view(h.shape[0], h.shape[2], *[self.resolution // self.patch_size] * 3)
         h = unpatchify(h, self.patch_size).contiguous()
 
+        if return_coordinate_head:
+            return h, coordinate_residual
         return h

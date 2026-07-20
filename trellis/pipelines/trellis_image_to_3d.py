@@ -220,7 +220,24 @@ class TrellisImageTo3DPipeline(Pipeline):
         # [B, 1, X, Y, Z], so argwhere returns (batch, channel, x, y, z); the channel
         # column is dropped to get SparseTensor coordinates (batch, x, y, z).
         decoder = self.models['sparse_structure_decoder']
-        coords = torch.argwhere(decoder(z_s)>0)[:, [0, 2, 3, 4]].int()
+        structure_logits = decoder(z_s)
+        if getattr(flow_model, 'coordinate_head', None) is not None:
+            head_cond = cond['cond']
+            if head_cond.shape[0] == 1 and z_s.shape[0] > 1:
+                head_cond = head_cond.repeat(z_s.shape[0], *([1] * (head_cond.ndim - 1)))
+            if head_cond.shape[0] != z_s.shape[0]:
+                raise ValueError(
+                    'Coordinate-head inference requires one conditioning image per sample'
+                )
+            _, coordinate_residual = flow_model(
+                z_s,
+                torch.zeros(z_s.shape[0], device=z_s.device, dtype=torch.float32),
+                head_cond,
+                category=cond.get('category'),
+                return_coordinate_head=True,
+            )
+            structure_logits = structure_logits + coordinate_residual
+        coords = torch.argwhere(structure_logits > 0)[:, [0, 2, 3, 4]].int()
 
         return coords
 

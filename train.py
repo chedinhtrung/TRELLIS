@@ -175,6 +175,17 @@ def build_model(model_cfg):
             )
         print(f'Initialized LoRA from {init_lora_ckpt}')
 
+    coordinate_head_cfg = model_cfg.get('coordinate_head', None)
+    if coordinate_head_cfg is not None:
+        if not hasattr(model, 'enable_coordinate_head'):
+            raise ValueError(f'{model.__class__.__name__} does not support a coordinate head')
+        model.enable_coordinate_head(
+            hidden_channels=coordinate_head_cfg.get('hidden_channels', 64),
+            output_resolution=coordinate_head_cfg.get('output_resolution', 64),
+        )
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        print(f'Enabled coordinate head: {trainable} total trainable parameters')
+
     interior_expert_cfg = model_cfg.get('interior_expert', None)
     if interior_expert_cfg is not None:
         for parameter in model.parameters():

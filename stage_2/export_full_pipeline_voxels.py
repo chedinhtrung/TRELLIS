@@ -122,6 +122,14 @@ def load_lora(model, ckpt_path: Path, *, model_key: str = "denoiser"):
     categories = model_cfg.get("categories")
     if categories is not None:
         model.enable_category_conditioning(categories)
+    coordinate_head_cfg = model_cfg.get("coordinate_head")
+    if coordinate_head_cfg is not None:
+        if not hasattr(model, "enable_coordinate_head"):
+            raise ValueError(f"{model.__class__.__name__} does not support a coordinate head")
+        model.enable_coordinate_head(
+            hidden_channels=coordinate_head_cfg.get("hidden_channels", 64),
+            output_resolution=coordinate_head_cfg.get("output_resolution", 64),
+        )
     interior_expert_cfg = model_cfg.get("interior_expert")
     if interior_expert_cfg is not None:
         if not hasattr(model, "enable_interior_expert"):
@@ -139,6 +147,7 @@ def load_lora(model, ckpt_path: Path, *, model_key: str = "denoiser"):
         or ".lora_up" in key
         or key.startswith("category_embedding.")
         or key.startswith("interior_expert.")
+        or key.startswith("coordinate_head.")
     }
     if set(state) != expected:
         raise RuntimeError(
@@ -171,6 +180,12 @@ def mesh_to_voxel_points(mesh, resolution: int) -> np.ndarray:
     if len(coords) == 0:
         return np.zeros((0, 3), dtype=np.float32)
     return ((coords + 0.5) / resolution - 0.5).astype(np.float32)
+
+
+def sparse_coords_to_points(coords: torch.Tensor, resolution: int) -> np.ndarray:
+    coords = coords.detach().cpu()
+    coords = coords[coords[:, 0] == 0, 1:]
+    return ((coords.float() + 0.5) / resolution - 0.5).numpy().astype(np.float32)
 
 
 def main() -> None:
@@ -207,8 +222,10 @@ def main() -> None:
     method_dir = args.output_dir
     mesh_dir = method_dir / "mesh"
     voxel_dir = method_dir / "voxels"
+    structure_dir = method_dir / "structure_voxels"
     mesh_dir.mkdir(parents=True, exist_ok=True)
     voxel_dir.mkdir(parents=True, exist_ok=True)
+    structure_dir.mkdir(parents=True, exist_ok=True)
 
     metadata_path = args.dataset_dir / "metadata.csv"
     ids = read_ids(metadata_path)
@@ -274,7 +291,13 @@ def main() -> None:
     for sample_id in tqdm(ids, desc="Exporting full-pipeline voxels"):
         mesh_out_path = mesh_dir / f"{sample_id}.ply"
         voxel_out_path = voxel_dir / f"{sample_id}.ply"
-        if args.skip_existing and mesh_out_path.exists() and voxel_out_path.exists():
+        structure_out_path = structure_dir / f"{sample_id}.ply"
+        if (
+            args.skip_existing
+            and mesh_out_path.exists()
+            and voxel_out_path.exists()
+            and structure_out_path.exists()
+        ):
             continue
 
         with Image.open(image_paths[sample_id]) as image, torch.inference_mode():
@@ -286,6 +309,10 @@ def main() -> None:
                 coords = pipeline.sample_sparse_structure(cond, num_samples=1)
             else:
                 coords = add_batch_column(gt_coords[sample_id], device)
+            utils3d.io.write_ply(
+                structure_out_path,
+                sparse_coords_to_points(coords, args.resolution),
+            )
             slat_noise = None
             if args.slat_seed is not None:
                 flow_model = pipeline.models["slat_flow_model"]
@@ -305,6 +332,7 @@ def main() -> None:
 
     print(f"Wrote mesh PLYs to {mesh_dir}")
     print(f"Wrote voxel PLYs to {voxel_dir}")
+    print(f"Wrote sparse-structure PLYs to {structure_dir}")
 
 
 if __name__ == "__main__":

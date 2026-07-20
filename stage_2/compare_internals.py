@@ -108,6 +108,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--per-sample-output", type=Path, required=True)
     parser.add_argument("--resolution", type=int, default=64)
+    parser.add_argument("--prediction-subdir", default="voxels")
     parser.add_argument("--margins", type=int, nargs="+", default=[1, 2, 3, 4])
     args = parser.parse_args()
 
@@ -143,7 +144,7 @@ def main() -> None:
             seed_rows = {margin: [] for margin in args.margins}
             for sample_id in ids:
                 gt_path = args.gt_voxels / f"{sample_id}.ply"
-                pred_path = seed_dir / "voxels" / f"{sample_id}.ply"
+                pred_path = seed_dir / args.prediction_subdir / f"{sample_id}.ply"
                 if not gt_path.is_file():
                     raise FileNotFoundError(f"Missing ground-truth voxels: {gt_path}")
                 if not pred_path.is_file():
