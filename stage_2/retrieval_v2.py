@@ -578,12 +578,17 @@ def transfer_supported_components(
     preset: ComponentPreset,
     voxel_budget: int,
     resolution: int,
+    donor_components: list[set[Voxel]] | None = None,
 ) -> tuple[set[Voxel], set[Voxel], dict[str, float | int]]:
     """Transfer complete aligned donor components and retain provenance."""
     candidates = []
     rejected_small = rejected_clipped = rejected_fragmented = rejected_support = 0
-    donor_components = connected_components(donor_internal)
-    for original_component in donor_components:
+    components = (
+        donor_components
+        if donor_components is not None
+        else connected_components(donor_internal)
+    )
+    for original_component in components:
         aligned_whole = align_voxels(original_component, alignment, resolution)
         clipped = aligned_whole & safe_volume
         if len(clipped) < preset.min_component_voxels:
@@ -627,7 +632,7 @@ def transfer_supported_components(
 
     return transferred, accepted_source, {
         "donor_internal_voxels": len(donor_internal),
-        "donor_components": len(donor_components),
+        "donor_components": len(components),
         "eligible_components": len(candidates),
         "kept_components": kept,
         "transferred_voxels": len(transferred),
@@ -649,6 +654,7 @@ def transfer_structural_fragments(
     preset: StructuralPreset,
     voxel_budget: int,
     resolution: int,
+    donor_components: list[set[Voxel]] | None = None,
 ) -> tuple[set[Voxel], set[Voxel], dict[str, float | int]]:
     """Transfer large donor-derived fragments after target-safe clipping.
 
@@ -658,10 +664,14 @@ def transfer_structural_fragments(
     large, surface-like fragments supported by another retrieved candidate.
     Every output voxel remains a transformed voxel of the selected donor.
     """
-    donor_components = connected_components(donor_internal)
+    components = (
+        donor_components
+        if donor_components is not None
+        else connected_components(donor_internal)
+    )
     candidates = []
     rejected_small = rejected_dense = rejected_support = 0
-    for original_component in donor_components:
+    for original_component in components:
         aligned_whole = align_voxels(original_component, alignment, resolution)
         clipped = aligned_whole & safe_volume
         for fragment in connected_components(clipped):
@@ -704,7 +714,7 @@ def transfer_structural_fragments(
     usable_donor = align_voxels(donor_internal, alignment, resolution) & safe_volume
     return transferred, accepted_source, {
         "donor_internal_voxels": len(donor_internal),
-        "donor_components": len(donor_components),
+        "donor_components": len(components),
         "eligible_components": len(candidates),
         "kept_components": kept,
         "transferred_voxels": len(transferred),

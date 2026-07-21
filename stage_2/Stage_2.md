@@ -216,3 +216,37 @@ Outputs are written to `results/retrieval_v21_calibration_view18` and
 `results/retrieval_v21_view18`. The visualization notebook reads the v2.1
 manifest and shows the strongest available bus, cabinet, car, and file-cabinet
 half cuts with explicit fallback labels.
+
+## Unified Adaptive Retrieval
+
+The unified method removes every category-specific inference branch. For each
+view-18 query it aligns the same DINO top-20 donor set. Four frozen donor
+experts, a shared donor ranker, and fixed diversity anchors choose eight donors;
+every expert is applied to every query, with no category branch. Both proven hypotheses are
+created for each: component-preserving hybrid fusion and coherent
+structural-fragment replacement. One shared category-blind selector ranks the
+16 donor/operator hypotheses, and one global train-calibrated confidence gate either
+accepts the best hypothesis or returns Objective 1 unchanged. Category is used
+only to restrict the donor gallery to semantically compatible training shapes;
+it is not a selector feature.
+
+Calibration uses train-only ground truth. The default run makes one durable
+geometry-cache pass over up to 160 selector queries per category. It excludes
+the 48 labeled queries per class used to fit the donor rankers, leaving 552
+disjoint selector queries with the current data (160 bus, 160 cabinet, 160 car,
+and 72 file cabinets). It fits five query-level cross-validation models and
+refuses to write a deployable policy unless both car and bus improve under the
+same global gate without degrading precision or internal density. Set
+`UNIFIED_QUERIES_PER_CATEGORY=0` to use every remaining disjoint query. The
+expensive cache survives interruption and a failed preflight.
+
+Run training, held-out export, and smooth visualization preparation with:
+
+```bash
+bash stage_2/run_retrieval_unified_view18.sh
+```
+
+Outputs are written to `results/retrieval_unified_calibration_view18` and
+`results/retrieval_unified_view18`. The visualization notebook defaults to the
+unified manifest and renders ground truth, Objective 1, and unified retrieval
+with synchronized smooth half cuts.
