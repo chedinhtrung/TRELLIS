@@ -152,8 +152,12 @@ def tolerant_overlap_fraction(
 
         return float(np.mean(np.isin(encode(source_points), np.unique(encode(expanded)))))
     else:
+        inclusive_bound = float(np.nextafter(tolerance, np.inf))
         distances, _ = cKDTree(_points(target)).query(
-            _points(source), k=1, p=np.inf, distance_upper_bound=tolerance
+            _points(source),
+            k=1,
+            p=np.inf,
+            distance_upper_bound=inclusive_bound,
         )
         return float(np.mean(np.isfinite(distances)))
 
@@ -489,11 +493,12 @@ def unmatched_voxels(
             if tolerant_overlap_fraction({voxel}, reference, tolerance) == 0.0
         }
     else:
+        inclusive_bound = float(np.nextafter(tolerance, np.inf))
         distances, _ = cKDTree(_points(reference)).query(
             np.asarray(ordered, dtype=np.float64),
             k=1,
             p=np.inf,
-            distance_upper_bound=tolerance,
+            distance_upper_bound=inclusive_bound,
         )
         return {
             voxel

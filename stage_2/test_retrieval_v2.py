@@ -21,6 +21,11 @@ from retrieval_v2 import (
 
 
 class RetrievalV2Tests(unittest.TestCase):
+    def test_tolerance_includes_exact_one_voxel_boundary(self) -> None:
+        left = {(10, 10, 10)}
+        right = {(11, 10, 10)}
+        self.assertEqual(tolerant_f1(left, right, 1.0), 1.0)
+
     def test_alignment_is_small_and_improves_shifted_surface(self) -> None:
         source = {(x, 10, 10) for x in range(10, 30)}
         target = {(x + 2, 10, 10) for x in range(10, 30)}
