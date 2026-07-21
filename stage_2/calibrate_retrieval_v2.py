@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from time import monotonic
 
 import numpy as np
 
@@ -93,6 +95,21 @@ def split_queries(metadata: list[dict[str, str]]) -> tuple[set[str], set[str]]:
     return reranker_fit, fusion_calibration
 
 
+def balanced_cap(
+    sample_ids: set[str], categories: dict[str, str], per_category: int
+) -> set[str]:
+    """Keep a deterministic, category-balanced subset of hash-randomized IDs."""
+    if per_category == 0:
+        return set(sample_ids)
+    by_category: dict[str, list[str]] = defaultdict(list)
+    for sample_id in sample_ids:
+        by_category[categories[sample_id]].append(sample_id)
+    selected: set[str] = set()
+    for ids in by_category.values():
+        selected.update(sorted(ids)[:per_category])
+    return selected
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Train-only calibration for retrieval-v2 reranking and hybrid fusion."
@@ -108,14 +125,37 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--ridge", type=float, default=1.0)
     parser.add_argument("--max-internal-ratio", type=float, default=1.15)
+    parser.add_argument(
+        "--reranker-queries-per-category",
+        type=int,
+        default=0,
+        help="Deterministic per-category cap; zero uses the complete 75%% split.",
+    )
+    parser.add_argument(
+        "--fusion-queries-per-category",
+        type=int,
+        default=0,
+        help="Deterministic per-category cap; zero uses the complete 25%% split.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of shared-memory query workers.",
+    )
     args = parser.parse_args()
 
     if args.view_index != 18:
         raise ValueError("retrieval-v2 is intentionally calibrated for view 18")
     if args.top_k < 2 or args.resolution < 1 or args.margin < 1:
         raise ValueError("top-k must be >=2; resolution and margin must be positive")
-    if args.ridge <= 0 or args.max_internal_ratio <= 0:
-        raise ValueError("ridge and max-internal-ratio must be positive")
+    if args.ridge <= 0 or args.max_internal_ratio <= 0 or args.workers < 1:
+        raise ValueError("ridge, max-internal-ratio, and workers must be positive")
+    if (
+        args.reranker_queries_per_category < 0
+        or args.fusion_queries_per_category < 0
+    ):
+        raise ValueError("query caps must be non-negative")
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         raise FileExistsError(
             f"Output directory is not empty: {args.output_dir}. Use a new directory."
@@ -127,28 +167,62 @@ def main() -> None:
     )
     rankings = make_rankings(metadata, embeddings, args.top_k)
     categories = {row["sha256"]: row["category"] for row in metadata}
-    reranker_ids, fusion_ids = split_queries(metadata)
+    reranker_pool_ids, fusion_pool_ids = split_queries(metadata)
+    reranker_ids = balanced_cap(
+        reranker_pool_ids, categories, args.reranker_queries_per_category
+    )
+    fusion_ids = balanced_cap(
+        fusion_pool_ids, categories, args.fusion_queries_per_category
+    )
+    calibration_ids = reranker_ids | fusion_ids
+    required_gt_ids = set(calibration_ids)
+    for query_id in calibration_ids:
+        required_gt_ids.update(
+            str(row["retrieved_id"]) for row in rankings[query_id]
+        )
 
-    print(f"Loading GT and Objective-1 voxels for {len(metadata)} train shapes")
+    def category_counts(sample_ids: set[str]) -> str:
+        counts = defaultdict(int)
+        for sample_id in sample_ids:
+            counts[categories[sample_id]] += 1
+        return ", ".join(
+            f"{category}={counts[category]}" for category in sorted(counts)
+        )
+
+    print(
+        f"Calibration query subset: reranker {len(reranker_ids)} "
+        f"({category_counts(reranker_ids)}); fusion {len(fusion_ids)} "
+        f"({category_counts(fusion_ids)})"
+    )
+
+    print(
+        f"Loading GT for {len(required_gt_ids)} required queries/donors and "
+        f"Objective-1 for the {len(calibration_ids)} calibration queries"
+    )
     gt_internals = {}
     gt_exteriors = {}
     objective1_internals = {}
     objective1_exteriors = {}
-    for index, row in enumerate(metadata, start=1):
-        sample_id = row["sha256"]
+    for index, sample_id in enumerate(sorted(required_gt_ids), start=1):
         gt_path = args.train_dir / "voxels" / f"{sample_id}.ply"
-        objective1_path = args.objective1_voxels / f"{sample_id}.ply"
-        for path in (gt_path, objective1_path):
-            if not path.is_file():
-                raise FileNotFoundError(f"Missing calibration voxel PLY: {path}")
+        if not gt_path.is_file():
+            raise FileNotFoundError(f"Missing calibration voxel PLY: {gt_path}")
         gt = read_voxels(gt_path, args.resolution)
-        objective1 = read_voxels(objective1_path, args.resolution)
         gt_internals[sample_id] = interior(gt, args.margin)
         gt_exteriors[sample_id] = gt - gt_internals[sample_id]
-        objective1_internals[sample_id] = interior(objective1, args.margin)
-        objective1_exteriors[sample_id] = objective1 - objective1_internals[sample_id]
-        if index % 100 == 0 or index == len(metadata):
-            print(f"  loaded {index}/{len(metadata)}")
+        if sample_id in calibration_ids:
+            objective1_path = args.objective1_voxels / f"{sample_id}.ply"
+            if not objective1_path.is_file():
+                raise FileNotFoundError(
+                    f"Missing calibration voxel PLY: {objective1_path}"
+                )
+            objective1 = read_voxels(objective1_path, args.resolution)
+            objective1_internals[sample_id] = interior(objective1, args.margin)
+            objective1_exteriors[sample_id] = (
+                objective1 - objective1_internals[sample_id]
+            )
+        if index % 100 == 0 or index == len(required_gt_ids):
+            print(f"  loaded {index}/{len(required_gt_ids)}")
 
     print("Fitting category rerankers on the 75% selector split")
     rerankers = {}
@@ -161,7 +235,8 @@ def main() -> None:
             for sample_id in reranker_ids
             if categories[sample_id] == category
         )
-        for query_index, query_id in enumerate(category_ids, start=1):
+
+        def prepare_reranker_query(query_id: str) -> tuple[list, list, list]:
             safe = enclosed_volume(objective1_exteriors[query_id], args.margin)
             records = prepare_candidate_records(
                 rankings[query_id],
@@ -172,6 +247,9 @@ def main() -> None:
                 safe,
                 args.resolution,
             )
+            query_features = []
+            query_labels = []
+            query_rows = []
             for record in records:
                 candidate_prediction = objective1_exteriors[query_id] | (
                     record["aligned_internal"] & safe
@@ -179,9 +257,9 @@ def main() -> None:
                 label = exact_f1(
                     gt_internals[query_id], interior(candidate_prediction, args.margin)
                 )
-                feature_rows.append(record["features"])
-                labels.append(label)
-                reranker_rows.append({
+                query_features.append(record["features"])
+                query_labels.append(label)
+                query_rows.append({
                     "split": "reranker_fit",
                     "category": category,
                     "sample_id": query_id,
@@ -190,8 +268,24 @@ def main() -> None:
                     **record["features"],
                     "target_internal_f1": label,
                 })
-            if query_index % 50 == 0:
-                print(f"  {category}: prepared {query_index}/{len(category_ids)} queries")
+            return query_features, query_labels, query_rows
+
+        started = monotonic()
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            prepared_queries = executor.map(prepare_reranker_query, category_ids)
+            for query_index, prepared in enumerate(prepared_queries, start=1):
+                query_features, query_labels, query_rows = prepared
+                feature_rows.extend(query_features)
+                labels.extend(query_labels)
+                reranker_rows.extend(query_rows)
+                if query_index % 12 == 0 or query_index == len(category_ids):
+                    elapsed = monotonic() - started
+                    remaining = elapsed / query_index * (len(category_ids) - query_index)
+                    print(
+                        f"  {category}: prepared {query_index}/{len(category_ids)} "
+                        f"queries ({elapsed / 60:.1f} min elapsed, "
+                        f"~{remaining / 60:.1f} min remaining)"
+                    )
         rerankers[category] = fit_ridge(feature_rows, labels, args.ridge)
         print(
             f"  {category}: {len(category_ids)} queries, "
@@ -224,6 +318,7 @@ def main() -> None:
     selector_diagnostics = []
     baseline_by_category: dict[str, list[dict]] = defaultdict(list)
 
+    fusion_started = monotonic()
     for query_index, query_id in enumerate(sorted(fusion_ids), start=1):
         category = categories[query_id]
         query_gt = gt_internals[query_id]
@@ -342,8 +437,14 @@ def main() -> None:
                                 accumulator["core_fraction"] += float(metrics["core_fraction"])
                                 accumulator["fallback"] += int(use_fallback)
                                 counts[key] += 1
-        if query_index % 25 == 0 or query_index == len(fusion_ids):
-            print(f"  prepared {query_index}/{len(fusion_ids)} fusion queries")
+        if query_index % 12 == 0 or query_index == len(fusion_ids):
+            elapsed = monotonic() - fusion_started
+            remaining = elapsed / query_index * (len(fusion_ids) - query_index)
+            print(
+                f"  prepared {query_index}/{len(fusion_ids)} fusion queries "
+                f"({elapsed / 60:.1f} min elapsed, "
+                f"~{remaining / 60:.1f} min remaining)"
+            )
 
     summary_rows = []
     for key, accumulator in accumulators.items():
@@ -452,8 +553,13 @@ def main() -> None:
         "margin": args.margin,
         "split": {
             "rule": "sorted per category; index modulo 4 == 0 is fusion calibration",
+            "reranker_pool_samples": len(reranker_pool_ids),
+            "fusion_pool_samples": len(fusion_pool_ids),
             "reranker_fit_samples": len(reranker_ids),
             "fusion_calibration_samples": len(fusion_ids),
+            "reranker_queries_per_category_cap": args.reranker_queries_per_category,
+            "fusion_queries_per_category_cap": args.fusion_queries_per_category,
+            "workers": args.workers,
         },
         "max_internal_ratio": args.max_internal_ratio,
         "categories": policy,

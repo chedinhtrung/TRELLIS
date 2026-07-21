@@ -9,6 +9,9 @@ DINO_DIR="${DINO_DIR:-$REPO_ROOT/results/dino_retrieval_view18}"
 CALIBRATION_DIR="${CALIBRATION_DIR:-$REPO_ROOT/results/retrieval_v2_calibration_view18}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/results/retrieval_v2_view18}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
+RERANKER_QUERIES_PER_CATEGORY="${RERANKER_QUERIES_PER_CATEGORY:-48}"
+FUSION_QUERIES_PER_CATEGORY="${FUSION_QUERIES_PER_CATEGORY:-24}"
+CALIBRATION_WORKERS="${CALIBRATION_WORKERS:-4}"
 
 TRAIN_DIR="$DATASET_ROOT/train"
 TEST_DIR="$DATASET_ROOT/test"
@@ -50,7 +53,7 @@ done
 if [[ -f "$POLICY" ]]; then
     echo "[1/2] Reusing frozen retrieval-v2 policy at $POLICY"
 else
-    echo "[1/2] Fitting the top-20 reranker and hybrid gate on train-only splits"
+    echo "[1/2] Fitting the top-20 reranker and hybrid gate on balanced train-only subsets"
     "$PYTHON_BIN" stage_2/calibrate_retrieval_v2.py \
         --train-dir "$TRAIN_DIR" \
         --objective1-voxels "$OBJECTIVE1_TRAIN_VOXELS" \
@@ -62,7 +65,10 @@ else
         --margin 2 \
         --top-k 20 \
         --ridge 1.0 \
-        --max-internal-ratio 1.15
+        --max-internal-ratio 1.15 \
+        --reranker-queries-per-category "$RERANKER_QUERIES_PER_CATEGORY" \
+        --fusion-queries-per-category "$FUSION_QUERIES_PER_CATEGORY" \
+        --workers "$CALIBRATION_WORKERS"
 fi
 
 echo "[2/2] Applying the frozen policy and exporting voxel plus smooth triangle meshes"
