@@ -408,6 +408,69 @@ def predict_quality(features: dict[str, float], model: dict) -> float:
     return float(np.clip(prediction, 0.0, 1.0))
 
 
+def choose_conservative_policy(
+    options: list[dict], baseline_rows: list[dict], max_internal_ratio: float
+) -> dict:
+    """Select a calibrated policy while guaranteeing Objective-1 fallback.
+
+    The absolute ratio ceiling must not outlaw the baseline itself.  When
+    Objective 1 already exceeds that ceiling, retrieval is instead forbidden
+    from making the category-level ratio any worse.
+    """
+    if not options or not baseline_rows:
+        raise ValueError("policy selection requires options and baseline rows")
+    baseline_precision = float(np.mean([
+        float(row["internal_precision"]) for row in baseline_rows
+    ]))
+    baseline_core = float(np.mean([
+        float(row["core_fraction"]) for row in baseline_rows
+    ]))
+    baseline_predicted = sum(
+        int(row["pred_internal_voxels"]) for row in baseline_rows
+    )
+    baseline_ground_truth = sum(
+        int(row["gt_internal_voxels"]) for row in baseline_rows
+    )
+    baseline_ratio = (
+        baseline_predicted / baseline_ground_truth
+        if baseline_ground_truth
+        else 0.0
+    )
+    ratio_ceiling = max(float(max_internal_ratio), baseline_ratio)
+    epsilon = 1e-12
+    valid = [
+        row for row in options
+        if float(row["micro_internal_ratio"]) <= ratio_ceiling + epsilon
+        and float(row["internal_precision"]) >= baseline_precision - 0.005 - epsilon
+        and float(row["mean_core_fraction"]) <= baseline_core + 0.01 + epsilon
+    ]
+    if not valid:
+        # A full fallback has exactly the Objective-1 metrics and is always
+        # safer than aborting after calibration. This branch also protects
+        # against future grid or floating-point changes.
+        valid = [
+            row for row in options
+            if float(row["fallback_fraction"]) >= 1.0 - epsilon
+        ]
+    if not valid:
+        raise RuntimeError("policy grid contains no complete Objective-1 fallback")
+
+    best_f1 = max(float(row["internal_f1"]) for row in valid)
+    near_best = [
+        row for row in valid
+        if float(row["internal_f1"]) >= best_f1 - 0.002
+    ]
+    return max(
+        near_best,
+        key=lambda row: (
+            float(row["fallback_fraction"]),
+            float(row["internal_f1"]),
+            float(row["internal_f05"]),
+            float(row["internal_precision"]),
+        ),
+    )
+
+
 def support_counts(candidate_internals: list[set[Voxel]]) -> Counter[Voxel]:
     counts: Counter[Voxel] = Counter()
     for voxels in candidate_internals:

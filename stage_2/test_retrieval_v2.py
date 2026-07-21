@@ -11,6 +11,7 @@ from retrieval_v2 import (
     Alignment,
     ComponentPreset,
     align_voxels,
+    choose_conservative_policy,
     find_alignment,
     fit_ridge,
     hybrid_fusion,
@@ -80,6 +81,36 @@ class RetrievalV2Tests(unittest.TestCase):
         ]
         model = fit_ridge(rows, [index / 10 for index in range(10)])
         self.assertGreater(predict_quality(rows[-1], model), predict_quality(rows[0], model))
+
+    def test_policy_fallback_survives_overfilled_baseline(self) -> None:
+        baseline = [{
+            "internal_precision": 0.40,
+            "core_fraction": 0.20,
+            "pred_internal_voxels": 150,
+            "gt_internal_voxels": 100,
+        }]
+        fallback = {
+            "name": "fallback",
+            "micro_internal_ratio": 1.50,
+            "internal_precision": 0.40,
+            "mean_core_fraction": 0.20,
+            "internal_f1": 0.45,
+            "internal_f05": 0.41,
+            "fallback_fraction": 1.0,
+        }
+        rejected = {
+            "name": "unsafe",
+            "micro_internal_ratio": 1.60,
+            "internal_precision": 0.39,
+            "mean_core_fraction": 0.22,
+            "internal_f1": 0.50,
+            "internal_f05": 0.45,
+            "fallback_fraction": 0.0,
+        }
+        selected = choose_conservative_policy(
+            [fallback, rejected], baseline, max_internal_ratio=1.15
+        )
+        self.assertEqual(selected["name"], "fallback")
 
 
 if __name__ == "__main__":

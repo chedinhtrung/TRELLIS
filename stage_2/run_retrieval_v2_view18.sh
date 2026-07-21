@@ -68,7 +68,8 @@ else
         --max-internal-ratio 1.15 \
         --reranker-queries-per-category "$RERANKER_QUERIES_PER_CATEGORY" \
         --fusion-queries-per-category "$FUSION_QUERIES_PER_CATEGORY" \
-        --workers "$CALIBRATION_WORKERS"
+        --workers "$CALIBRATION_WORKERS" \
+        --resume
 fi
 
 echo "[2/2] Applying the frozen policy and exporting voxel plus smooth triangle meshes"

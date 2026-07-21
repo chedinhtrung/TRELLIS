@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pickle
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -21,6 +22,7 @@ from retrieval_v2 import (
     COMPONENT_PRESETS,
     component_core_fraction,
     component_preset_payload,
+    choose_conservative_policy,
     exact_f1,
     fit_ridge,
     hybrid_fusion,
@@ -143,6 +145,11 @@ def main() -> None:
         default=1,
         help="Number of shared-memory query workers.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from the durable calibration checkpoint in output-dir.",
+    )
     args = parser.parse_args()
 
     if args.view_index != 18:
@@ -156,10 +163,15 @@ def main() -> None:
         or args.fusion_queries_per_category < 0
     ):
         raise ValueError("query caps must be non-negative")
-    if args.output_dir.exists() and any(args.output_dir.iterdir()):
+    if (
+        args.output_dir.exists()
+        and any(args.output_dir.iterdir())
+        and not args.resume
+    ):
         raise FileExistsError(
-            f"Output directory is not empty: {args.output_dir}. Use a new directory."
+            f"Output directory is not empty: {args.output_dir}. Use --resume or a new directory."
         )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     metadata = read_metadata(args.train_dir / "metadata.csv")
     embeddings = load_train_embeddings(
@@ -180,6 +192,22 @@ def main() -> None:
         required_gt_ids.update(
             str(row["retrieved_id"]) for row in rankings[query_id]
         )
+
+    checkpoint_signature = {
+        "version": 1,
+        "view_index": args.view_index,
+        "model": args.model,
+        "resolution": args.resolution,
+        "margin": args.margin,
+        "top_k": args.top_k,
+        "ridge": args.ridge,
+        "max_internal_ratio": args.max_internal_ratio,
+        "reranker_queries_per_category": args.reranker_queries_per_category,
+        "fusion_queries_per_category": args.fusion_queries_per_category,
+        "reranker_ids": sorted(reranker_ids),
+        "fusion_ids": sorted(fusion_ids),
+    }
+    checkpoint_path = args.output_dir / "calibration_checkpoint.pkl"
 
     def category_counts(sample_ids: set[str]) -> str:
         counts = defaultdict(int)
@@ -224,10 +252,61 @@ def main() -> None:
         if index % 100 == 0 or index == len(required_gt_ids):
             print(f"  loaded {index}/{len(required_gt_ids)}")
 
+    rerankers: dict[str, dict] = {}
+    reranker_rows: list[dict] = []
+    accumulators: dict[tuple, dict[str, float]] = defaultdict(
+        lambda: defaultdict(float)
+    )
+    counts: dict[tuple, int] = defaultdict(int)
+    selector_diagnostics: list[dict] = []
+    baseline_by_category: dict[str, list[dict]] = defaultdict(list)
+    processed_fusion_ids: set[str] = set()
+
+    if args.resume and checkpoint_path.is_file():
+        with checkpoint_path.open("rb") as file:
+            checkpoint = pickle.load(file)
+        if checkpoint.get("signature") != checkpoint_signature:
+            raise ValueError(
+                f"Calibration checkpoint configuration mismatch: {checkpoint_path}"
+            )
+        rerankers = checkpoint["rerankers"]
+        reranker_rows = checkpoint["reranker_rows"]
+        accumulators.update({
+            key: defaultdict(float, value)
+            for key, value in checkpoint["accumulators"].items()
+        })
+        counts.update(checkpoint["counts"])
+        selector_diagnostics = checkpoint["selector_diagnostics"]
+        baseline_by_category.update(checkpoint["baseline_by_category"])
+        processed_fusion_ids = set(checkpoint["processed_fusion_ids"])
+        print(
+            f"Resuming checkpoint: {len(rerankers)}/4 rerankers and "
+            f"{len(processed_fusion_ids)}/{len(fusion_ids)} fusion queries complete"
+        )
+
+    def save_checkpoint() -> None:
+        checkpoint = {
+            "signature": checkpoint_signature,
+            "rerankers": rerankers,
+            "reranker_rows": reranker_rows,
+            "accumulators": {
+                key: dict(value) for key, value in accumulators.items()
+            },
+            "counts": dict(counts),
+            "selector_diagnostics": selector_diagnostics,
+            "baseline_by_category": dict(baseline_by_category),
+            "processed_fusion_ids": sorted(processed_fusion_ids),
+        }
+        temporary = checkpoint_path.with_suffix(".tmp")
+        with temporary.open("wb") as file:
+            pickle.dump(checkpoint, file, protocol=pickle.HIGHEST_PROTOCOL)
+        temporary.replace(checkpoint_path)
+
     print("Fitting category rerankers on the 75% selector split")
-    rerankers = {}
-    reranker_rows = []
     for category in sorted(set(categories.values())):
+        if category in rerankers:
+            print(f"  {category}: reusing completed reranker from checkpoint")
+            continue
         feature_rows = []
         labels = []
         category_ids = sorted(
@@ -292,6 +371,7 @@ def main() -> None:
             f"RMSE={rerankers[category]['training_rmse']:.4f}, "
             f"corr={rerankers[category]['training_correlation']:.3f}"
         )
+        save_checkpoint()
 
     for row in reranker_rows:
         row["predicted_internal_f1"] = predict_quality(
@@ -311,15 +391,14 @@ def main() -> None:
         }
 
     print("Calibrating fusion and confidence gates on the disjoint 25% split")
-    accumulators: dict[tuple, dict[str, float]] = defaultdict(
-        lambda: defaultdict(float)
-    )
-    counts: dict[tuple, int] = defaultdict(int)
-    selector_diagnostics = []
-    baseline_by_category: dict[str, list[dict]] = defaultdict(list)
-
+    pending_fusion_ids = [
+        sample_id
+        for sample_id in sorted(fusion_ids)
+        if sample_id not in processed_fusion_ids
+    ]
+    initially_completed = len(processed_fusion_ids)
     fusion_started = monotonic()
-    for query_index, query_id in enumerate(sorted(fusion_ids), start=1):
+    for session_index, query_id in enumerate(pending_fusion_ids, start=1):
         category = categories[query_id]
         query_gt = gt_internals[query_id]
         base = objective1_internals[query_id]
@@ -437,9 +516,14 @@ def main() -> None:
                                 accumulator["core_fraction"] += float(metrics["core_fraction"])
                                 accumulator["fallback"] += int(use_fallback)
                                 counts[key] += 1
-        if query_index % 12 == 0 or query_index == len(fusion_ids):
+        processed_fusion_ids.add(query_id)
+        save_checkpoint()
+        query_index = initially_completed + session_index
+        if query_index % 12 == 0 or session_index == len(pending_fusion_ids):
             elapsed = monotonic() - fusion_started
-            remaining = elapsed / query_index * (len(fusion_ids) - query_index)
+            remaining = (
+                elapsed / session_index * (len(pending_fusion_ids) - session_index)
+            )
             print(
                 f"  prepared {query_index}/{len(fusion_ids)} fusion queries "
                 f"({elapsed / 60:.1f} min elapsed, "
@@ -484,37 +568,11 @@ def main() -> None:
 
     policy = {}
     for category in sorted(set(categories.values())):
-        baseline_rows = baseline_by_category[category]
-        baseline_precision = float(np.mean([
-            float(row["internal_precision"]) for row in baseline_rows
-        ]))
-        baseline_core = float(np.mean([
-            float(row["core_fraction"]) for row in baseline_rows
-        ]))
         options = [row for row in summary_rows if row["category"] == category]
-        valid = [
-            row for row in options
-            if float(row["micro_internal_ratio"]) <= args.max_internal_ratio
-            and float(row["internal_precision"]) >= baseline_precision - 0.005
-            and float(row["mean_core_fraction"]) <= baseline_core + 0.01
-        ]
-        if not valid:
-            raise RuntimeError(f"No conservative fusion policy remained for {category}")
-        best_f1 = max(float(row["internal_f1"]) for row in valid)
-        near_best = [
-            row for row in valid
-            if float(row["internal_f1"]) >= best_f1 - 0.002
-        ]
-        # A two-thousandths F1 difference on a small calibration category is
-        # not enough evidence to justify a much more aggressive gate.
-        selected = max(
-            near_best,
-            key=lambda row: (
-                float(row["fallback_fraction"]),
-                float(row["internal_f1"]),
-                float(row["internal_f05"]),
-                float(row["internal_precision"]),
-            ),
+        selected = choose_conservative_policy(
+            options,
+            baseline_by_category[category],
+            args.max_internal_ratio,
         )
         preset = next(
             item for item in COMPONENT_PRESETS
