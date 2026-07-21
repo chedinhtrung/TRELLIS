@@ -154,7 +154,7 @@ def choose_gallery(
             key=lambda row: (
                 -row["used_objective1_fallback"],
                 row["semantic_quality_delta"],
-                row["retrieval_v2_internal_precision"],
+                row["retrieval_internal_precision"],
             ),
             reverse=True,
         )
