@@ -62,10 +62,27 @@ class ComponentPreset:
     min_supported_fraction: float
 
 
+@dataclass(frozen=True)
+class StructuralPreset:
+    """Rules for coherent fragments cut from shell-connected donor geometry."""
+
+    name: str
+    min_fragment_voxels: int
+    min_other_support: int
+    min_supported_fraction: float
+    max_core_fraction: float
+
+
 COMPONENT_PRESETS = (
     ComponentPreset("detail", 12, 0.65, 1, 0.10),
     ComponentPreset("balanced", 24, 0.70, 1, 0.20),
     ComponentPreset("strict", 32, 0.75, 2, 0.25),
+)
+
+
+STRUCTURAL_PRESETS = (
+    StructuralPreset("structural", 24, 1, 0.10, 0.50),
+    StructuralPreset("large_structural", 64, 1, 0.10, 0.35),
 )
 
 
@@ -336,9 +353,7 @@ def prepare_candidate_records(
         records.append({
             **row,
             "alignment": alignment,
-            "aligned_exterior": align_voxels(
-                candidate_exteriors[candidate_id], alignment, resolution
-            ),
+            "source_internal": candidate_internals[candidate_id],
             "aligned_internal": align_voxels(
                 candidate_internals[candidate_id], alignment, resolution
             ),
@@ -394,6 +409,73 @@ def fit_ridge(
         "training_rows": len(feature_rows),
         "training_rmse": float(np.sqrt(np.mean((prediction - target) ** 2))),
         "training_correlation": correlation,
+    }
+
+
+def fit_query_centered_ridge(
+    feature_rows: list[dict[str, float]],
+    labels: list[float],
+    query_ids: list[str],
+    ridge: float = 1.0,
+) -> dict:
+    """Fit relative donor quality instead of between-query absolute quality.
+
+    Candidate features and targets are centered inside each retrieval query
+    before the linear solve.  This makes the training objective match the
+    operation performed at inference: ranking twenty donors for one object.
+    """
+    if (
+        len(feature_rows) != len(labels)
+        or len(feature_rows) != len(query_ids)
+        or not feature_rows
+    ):
+        raise ValueError(
+            "query-centered ridge requires equally sized non-empty inputs"
+        )
+    matrix = np.asarray(
+        [[row[name] for name in FEATURE_NAMES] for row in feature_rows],
+        dtype=np.float64,
+    )
+    target = np.asarray(labels, dtype=np.float64)
+    mean = matrix.mean(axis=0)
+    scale = matrix.std(axis=0)
+    scale[scale < 1e-8] = 1.0
+    normalized = (matrix - mean) / scale
+
+    centered_matrix = np.empty_like(normalized)
+    centered_target = np.empty_like(target)
+    groups: dict[str, list[int]] = {}
+    for index, query_id in enumerate(query_ids):
+        groups.setdefault(str(query_id), []).append(index)
+    for indices in groups.values():
+        centered_matrix[indices] = normalized[indices] - normalized[indices].mean(
+            axis=0
+        )
+        centered_target[indices] = target[indices] - target[indices].mean()
+
+    regularizer = ridge * np.eye(centered_matrix.shape[1], dtype=np.float64)
+    coefficient = np.linalg.solve(
+        centered_matrix.T @ centered_matrix + regularizer,
+        centered_matrix.T @ centered_target,
+    )
+    prediction = target.mean() + centered_matrix @ coefficient
+    correlation = (
+        float(np.corrcoef(prediction, target)[0, 1])
+        if np.std(prediction) > 1e-12 and np.std(target) > 1e-12
+        else 0.0
+    )
+    return {
+        "feature_names": list(FEATURE_NAMES),
+        "mean": mean.tolist(),
+        "scale": scale.tolist(),
+        "coefficient": coefficient.tolist(),
+        "intercept": float(target.mean()),
+        "ridge": float(ridge),
+        "training_rows": len(feature_rows),
+        "training_queries": len(groups),
+        "training_rmse": float(np.sqrt(np.mean((prediction - target) ** 2))),
+        "training_correlation": correlation,
+        "objective": "query_centered_ranking",
     }
 
 
@@ -559,6 +641,85 @@ def transfer_supported_components(
     }
 
 
+def transfer_structural_fragments(
+    donor_internal: set[Voxel],
+    alignment: Alignment,
+    safe_volume: set[Voxel],
+    all_support_counts: Counter[Voxel],
+    preset: StructuralPreset,
+    voxel_budget: int,
+    resolution: int,
+) -> tuple[set[Voxel], set[Voxel], dict[str, float | int]]:
+    """Transfer large donor-derived fragments after target-safe clipping.
+
+    Buses and cabinets often connect seats, floors, or shelves to the shell.
+    Requiring the complete pre-clipping component therefore rejects useful
+    structure.  Structural mode clips first, splits the result, and keeps only
+    large, surface-like fragments supported by another retrieved candidate.
+    Every output voxel remains a transformed voxel of the selected donor.
+    """
+    donor_components = connected_components(donor_internal)
+    candidates = []
+    rejected_small = rejected_dense = rejected_support = 0
+    for original_component in donor_components:
+        aligned_whole = align_voxels(original_component, alignment, resolution)
+        clipped = aligned_whole & safe_volume
+        for fragment in connected_components(clipped):
+            if len(fragment) < preset.min_fragment_voxels:
+                rejected_small += 1
+                continue
+            core_fraction = component_core_fraction(fragment)
+            if core_fraction > preset.max_core_fraction:
+                rejected_dense += 1
+                continue
+            supported = sum(
+                max(0, all_support_counts.get(voxel, 0) - int(voxel in aligned_whole))
+                >= preset.min_other_support
+                for voxel in fragment
+            )
+            supported_fraction = supported / len(fragment)
+            if supported_fraction < preset.min_supported_fraction:
+                rejected_support += 1
+                continue
+            candidates.append(
+                (supported_fraction, core_fraction, fragment, original_component)
+            )
+
+    candidates.sort(
+        key=lambda item: (-len(item[2]), -item[0], item[1], min(item[2]))
+    )
+    transferred: set[Voxel] = set()
+    accepted_source: set[Voxel] = set()
+    rejected_budget = 0
+    kept = 0
+    for _support, _core, fragment, original_component in candidates:
+        addition = fragment - transferred
+        if len(transferred) + len(addition) > voxel_budget:
+            rejected_budget += 1
+            continue
+        transferred.update(fragment)
+        accepted_source.update(original_component)
+        kept += 1
+
+    usable_donor = align_voxels(donor_internal, alignment, resolution) & safe_volume
+    return transferred, accepted_source, {
+        "donor_internal_voxels": len(donor_internal),
+        "donor_components": len(donor_components),
+        "eligible_components": len(candidates),
+        "kept_components": kept,
+        "transferred_voxels": len(transferred),
+        "usable_donor_voxels": len(usable_donor),
+        "voxel_budget": voxel_budget,
+        "budget_usage": len(transferred) / voxel_budget if voxel_budget else 0.0,
+        "rejected_small_components": rejected_small,
+        "rejected_clipped_components": 0,
+        "rejected_fragmented_components": 0,
+        "rejected_dense_components": rejected_dense,
+        "rejected_unsupported_components": rejected_support,
+        "rejected_budget_components": rejected_budget,
+    }
+
+
 def unmatched_voxels(
     source: set[Voxel], reference: set[Voxel], tolerance: float = 1.0
 ) -> set[Voxel]:
@@ -629,3 +790,56 @@ def component_preset_by_name(name: str) -> ComponentPreset:
 
 def component_preset_payload(preset: ComponentPreset) -> dict:
     return asdict(preset)
+
+
+def structural_preset_by_name(name: str) -> StructuralPreset:
+    for preset in STRUCTURAL_PRESETS:
+        if preset.name == name:
+            return preset
+    raise ValueError(f"unknown structural preset: {name}")
+
+
+def structural_preset_payload(preset: StructuralPreset) -> dict:
+    return asdict(preset)
+
+
+def bracketed_volume(
+    surface: set[Voxel], margin: int, required_axes: tuple[int, ...]
+) -> set[Voxel]:
+    """Cells bracketed by a surface along the requested coordinate axes."""
+    if margin < 1:
+        raise ValueError("margin must be positive")
+    if not surface:
+        return set()
+    if not required_axes or any(axis not in (0, 1, 2) for axis in required_axes):
+        raise ValueError("required_axes must contain one or more of 0, 1, 2")
+    axis_volumes = []
+    for axis in required_axes:
+        other_axes = [index for index in range(3) if index != axis]
+        groups: dict[tuple[int, int], list[int]] = {}
+        for voxel in surface:
+            key = (voxel[other_axes[0]], voxel[other_axes[1]])
+            groups.setdefault(key, []).append(voxel[axis])
+        axis_volume: set[Voxel] = set()
+        for key, positions in groups.items():
+            start = min(positions) + margin
+            stop = max(positions) - margin
+            for position in range(start, stop + 1):
+                voxel = [0, 0, 0]
+                voxel[axis] = position
+                voxel[other_axes[0]] = key[0]
+                voxel[other_axes[1]] = key[1]
+                axis_volume.add(tuple(voxel))
+        axis_volumes.append(axis_volume)
+    volume = axis_volumes[0]
+    for axis_volume in axis_volumes[1:]:
+        volume &= axis_volume
+    return volume
+
+
+def safe_volume_for_category(
+    exterior: set[Voxel], margin: int, category: str
+) -> set[Voxel]:
+    """Use an open-depth safety mask for cabinet-like categories."""
+    axes = (0, 2) if category in {"cabinet", "file_cabinet"} else (0, 1, 2)
+    return bracketed_volume(exterior, margin, axes)

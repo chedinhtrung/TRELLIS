@@ -187,3 +187,32 @@ Outputs are written to `results/retrieval_v2_calibration_view18` and
 `visualize_interior_comparisons.ipynb` shows the 15 strongest buses and 15
 strongest cars as synchronized smooth half cuts; it also contains an optional
 four-way voxel diagnostic for Objective 1, retrieval v1, and retrieval v2.
+
+## Retrieval v2.1: Category-Aware Structural Transfer
+
+Retrieval v2.1 preserves the frozen v2 car branch and corrects the geometry
+assumptions that caused other categories to fall back. Bus, cabinet, and file
+cabinet donors use a query-centered top-20 reranker. Shell-connected donor
+geometry may be split into large supported fragments after safe clipping, but
+every transferred voxel and triangle still comes from the single selected
+donor. Cabinet-like categories use a side-and-vertical enclosure mask so an
+open front does not erase shelves and drawers. Coverage is measured against
+usable donor content rather than an often-overfilled Objective-1 interior.
+
+All v2.1 choices are calibrated on the original train-only reranker/fusion
+split. The successful car policy is copied byte-for-byte from v2. Prepared
+non-car calibration queries are cached separately, so an interrupted run can
+resume and later policy sweeps do not repeat alignment work. If no safe
+improving structural policy exists for a category, calibration retains its
+frozen v2 policy instead of aborting.
+
+Run the category-aware calibration and held-out export with:
+
+```bash
+bash stage_2/run_retrieval_v21_view18.sh
+```
+
+Outputs are written to `results/retrieval_v21_calibration_view18` and
+`results/retrieval_v21_view18`. The visualization notebook reads the v2.1
+manifest and shows the strongest available bus, cabinet, car, and file-cabinet
+half cuts with explicit fallback labels.

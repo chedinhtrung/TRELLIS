@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply a frozen retrieval-v2 policy to held-out view-18 predictions."""
+"""Apply a frozen retrieval-v2 or category-aware v2.1 policy."""
 
 from __future__ import annotations
 
@@ -30,8 +30,11 @@ from retrieval_v2 import (
     hybrid_fusion,
     predict_quality,
     prepare_candidate_records,
+    safe_volume_for_category,
+    structural_preset_by_name,
     support_counts,
     transfer_supported_components,
+    transfer_structural_fragments,
     transform_points,
 )
 
@@ -53,13 +56,19 @@ BASE_METRICS = (
 )
 
 
-def read_policy(path: Path, view_index: int, resolution: int, margin: int) -> dict:
+def read_policy(
+    path: Path, view_index: int, resolution: int, margin: int
+) -> tuple[str, dict]:
     if not path.is_file():
         raise FileNotFoundError(f"Missing retrieval-v2 policy: {path}")
     with path.open(encoding="utf-8") as file:
         payload = json.load(file)
-    if payload.get("method") != "retrieval_v2_confidence_gated_hybrid":
-        raise ValueError(f"Unsupported policy method: {payload.get('method')!r}")
+    method = payload.get("method")
+    if method not in {
+        "retrieval_v2_confidence_gated_hybrid",
+        "retrieval_v21_category_structural",
+    }:
+        raise ValueError(f"Unsupported policy method: {method!r}")
     for name, expected in (
         ("view_index", view_index),
         ("resolution", resolution),
@@ -69,7 +78,7 @@ def read_policy(path: Path, view_index: int, resolution: int, margin: int) -> di
             raise ValueError(f"Policy {name}={payload.get(name)!r}, expected {expected}")
     if not payload.get("categories"):
         raise ValueError("Policy contains no category selections")
-    return payload["categories"]
+    return str(method), payload["categories"]
 
 
 def add_derived_metrics(metrics: dict, predicted_internal: set) -> dict:
@@ -103,7 +112,11 @@ def aggregate(rows: list[dict], group_names: tuple[str, ...]) -> list[dict]:
 
 
 def choose_gallery(
-    rows: list[dict], categories: list[str], count_per_category: int, margin: int
+    rows: list[dict],
+    categories: list[str],
+    count_per_category: int,
+    margin: int,
+    final_method: str,
 ) -> list[dict]:
     primary = defaultdict(dict)
     for row in rows:
@@ -112,7 +125,7 @@ def choose_gallery(
     selected = []
     for category in categories:
         candidates = []
-        for sample_id, final in primary["retrieval_v2"].items():
+        for sample_id, final in primary[final_method].items():
             if final["category"] != category:
                 continue
             baseline = primary["objective1"][sample_id]
@@ -129,10 +142,10 @@ def choose_gallery(
                     float(final["internal_f1"]) - float(baseline["internal_f1"])
                 ),
                 "objective1_internal_f1": float(baseline["internal_f1"]),
-                "retrieval_v2_internal_f1": float(final["internal_f1"]),
-                "retrieval_v2_internal_precision": float(final["internal_precision"]),
-                "retrieval_v2_internal_recall": float(final["internal_recall"]),
-                "retrieval_v2_internal_ratio": float(
+                "retrieval_internal_f1": float(final["internal_f1"]),
+                "retrieval_internal_precision": float(final["internal_precision"]),
+                "retrieval_internal_recall": float(final["internal_recall"]),
+                "retrieval_internal_ratio": float(
                     final["pred_to_gt_internal_ratio"]
                 ),
                 "used_objective1_fallback": int(final["used_objective1_fallback"]),
@@ -294,8 +307,13 @@ def main() -> None:
     if args.save_smooth_meshes and args.objective1_meshes is None:
         raise ValueError("--save-smooth-meshes requires --objective1-meshes")
 
-    policy = read_policy(
+    policy_method, policy = read_policy(
         args.policy, args.view_index, args.resolution, args.transplant_margin
+    )
+    final_method = (
+        "retrieval_v21"
+        if policy_method == "retrieval_v21_category_structural"
+        else "retrieval_v2"
     )
     maximum_k = max(int(selection["top_k"]) for selection in policy.values())
     selected_ids = read_selected_ids(args.ids_file)
@@ -327,8 +345,8 @@ def main() -> None:
         candidate_internals[candidate_id] = interior(voxels, args.transplant_margin)
         candidate_exteriors[candidate_id] = voxels - candidate_internals[candidate_id]
 
-    voxel_output = args.output_dir / "predictions" / "retrieval_v2" / "voxels"
-    mesh_output = args.output_dir / "predictions" / "retrieval_v2" / "mesh"
+    voxel_output = args.output_dir / "predictions" / final_method / "voxels"
+    mesh_output = args.output_dir / "predictions" / final_method / "mesh"
     gt_voxel_reference = args.output_dir / "references" / "ground_truth_voxels"
     args.output_dir.mkdir(parents=True, exist_ok=True)
     gt_voxel_reference.mkdir(parents=True, exist_ok=True)
@@ -355,7 +373,15 @@ def main() -> None:
         objective1 = read_voxels(objective1_path, args.resolution)
         objective1_internal = interior(objective1, args.transplant_margin)
         objective1_exterior = objective1 - objective1_internal
-        safe = enclosed_volume(objective1_exterior, args.transplant_margin)
+        mode = str(selection.get("mode", "v2_hybrid"))
+        feature_safe = enclosed_volume(objective1_exterior, args.transplant_margin)
+        safe = (
+            safe_volume_for_category(
+                objective1_exterior, args.transplant_margin, category
+            )
+            if mode == "structural_fragments"
+            else feature_safe
+        )
 
         records = prepare_candidate_records(
             ranking,
@@ -363,7 +389,7 @@ def main() -> None:
             candidate_exteriors,
             objective1_internal,
             objective1_exterior,
-            safe,
+            feature_safe,
             args.resolution,
         )
         for record in records:
@@ -378,6 +404,18 @@ def main() -> None:
                 -record["rank"],
             ),
         )
+        ordered_records = sorted(
+            records,
+            key=lambda record: (
+                -record["predicted_quality"],
+                -record["image_similarity"],
+                record["rank"],
+            ),
+        )
+        score_margin = (
+            float(ordered_records[0]["predicted_quality"])
+            - float(ordered_records[1]["predicted_quality"])
+        )
         donor_id = str(selected["retrieved_id"])
         support = support_counts([record["aligned_internal"] for record in records])
         category_budget = int(round(
@@ -390,19 +428,75 @@ def main() -> None:
             else category_budget
         )
         donor_budget = min(category_budget, base_budget)
-        preset = component_preset_by_name(selection["component_preset"]["name"])
-        transferred, accepted_source, transfer_diag = transfer_supported_components(
-            candidate_internals[donor_id],
-            selected["alignment"],
-            safe,
-            support,
-            preset,
-            donor_budget,
-            args.resolution,
+        if mode == "v2_hybrid":
+            preset = component_preset_by_name(selection["component_preset"]["name"])
+            transferred, accepted_source, transfer_diag = transfer_supported_components(
+                candidate_internals[donor_id],
+                selected["alignment"],
+                safe,
+                support,
+                preset,
+                donor_budget,
+                args.resolution,
+            )
+            coverage_denominator = len(objective1_internal)
+        elif mode == "structural_fragments":
+            preset = structural_preset_by_name(
+                selection["structural_preset"]["name"]
+            )
+            if selection.get("transfer_mode", "fragments") == "fragments":
+                transferred, accepted_source, transfer_diag = transfer_structural_fragments(
+                    candidate_internals[donor_id],
+                    selected["alignment"],
+                    safe,
+                    support,
+                    preset,
+                    donor_budget,
+                    args.resolution,
+                )
+            elif selection["transfer_mode"] == "full":
+                usable_full = selected["aligned_internal"] & safe
+                transferred = usable_full if len(usable_full) <= donor_budget else set()
+                accepted_source = (
+                    set(candidate_internals[donor_id]) if transferred else set()
+                )
+                transfer_diag = {
+                    "donor_internal_voxels": len(candidate_internals[donor_id]),
+                    "donor_components": 1,
+                    "eligible_components": int(bool(transferred)),
+                    "kept_components": int(bool(transferred)),
+                    "transferred_voxels": len(transferred),
+                    "usable_donor_voxels": len(usable_full),
+                    "voxel_budget": donor_budget,
+                    "budget_usage": (
+                        len(transferred) / donor_budget if donor_budget else 0.0
+                    ),
+                    "rejected_small_components": 0,
+                    "rejected_clipped_components": 0,
+                    "rejected_fragmented_components": 0,
+                    "rejected_dense_components": 0,
+                    "rejected_unsupported_components": 0,
+                    "rejected_budget_components": int(
+                        bool(usable_full) and not transferred
+                    ),
+                }
+            else:
+                raise ValueError(
+                    f"Unsupported structural transfer mode: "
+                    f"{selection.get('transfer_mode')!r}"
+                )
+            coverage_denominator = min(
+                len(selected["aligned_internal"] & safe), donor_budget
+            )
+        else:
+            raise ValueError(f"Unsupported category policy mode: {mode}")
+        transfer_diag.setdefault(
+            "usable_donor_voxels", len(selected["aligned_internal"] & safe)
         )
+        transfer_diag.setdefault("rejected_dense_components", 0)
         coverage = (
-            len(transferred) / len(objective1_internal)
-            if objective1_internal
+            len(transferred) / coverage_denominator
+            if coverage_denominator
             else float(bool(transferred))
         )
         gate_reasons = []
@@ -410,8 +504,14 @@ def main() -> None:
             gate_reasons.append("empty_transfer")
         if coverage < float(selection["minimum_transfer_coverage"]):
             gate_reasons.append("low_coverage")
-        if float(selected["predicted_quality"]) < float(selection["minimum_predicted_quality"]):
+        if mode == "v2_hybrid" and float(selected["predicted_quality"]) < float(
+            selection["minimum_predicted_quality"]
+        ):
             gate_reasons.append("low_predicted_quality")
+        if mode == "structural_fragments" and score_margin < float(
+            selection["minimum_score_margin"]
+        ):
+            gate_reasons.append("low_score_margin")
         use_fallback = bool(gate_reasons)
 
         if use_fallback:
@@ -431,14 +531,34 @@ def main() -> None:
             accepted_source = set()
             transferred_for_mesh = set()
         else:
-            fused_internal, preserved, fusion_diag = hybrid_fusion(
-                objective1_internal,
-                transferred,
-                safe,
-                int(selection["base_min_component_voxels"]),
-                float(selection["base_max_core_fraction"]),
-                category_budget,
-            )
+            if mode == "v2_hybrid" or selection.get("fusion_mode") == "hybrid":
+                base_minimum = int(selection.get("base_min_component_voxels", 64))
+                base_core = float(selection.get("base_max_core_fraction", 0.25))
+                fused_internal, preserved, fusion_diag = hybrid_fusion(
+                    objective1_internal,
+                    transferred,
+                    safe,
+                    base_minimum,
+                    base_core,
+                    category_budget,
+                )
+            elif selection.get("fusion_mode") == "replace":
+                preserved = objective1_internal - safe
+                fused_internal = transferred | preserved
+                fusion_diag = {
+                    "protected_objective1_voxels": len(preserved),
+                    "unmatched_objective1_voxels": 0,
+                    "eligible_objective1_components": 0,
+                    "preserved_objective1_voxels": len(preserved),
+                    "preserved_objective1_components": 0,
+                    "rejected_objective1_budget_components": 0,
+                    "fused_internal_voxels": len(fused_internal),
+                    "total_internal_budget": category_budget,
+                }
+            else:
+                raise ValueError(
+                    f"Unsupported structural fusion mode: {selection.get('fusion_mode')!r}"
+                )
             prediction = objective1_exterior | fused_internal
             transferred_for_mesh = transferred
 
@@ -460,7 +580,11 @@ def main() -> None:
             "alignment_scale_x": alignment["scale"][0],
             "alignment_scale_y": alignment["scale"][1],
             "alignment_scale_z": alignment["scale"][2],
+            "policy_mode": mode,
+            "selection_score_margin": score_margin,
+            "safe_volume_voxels": len(safe),
             "transfer_coverage": coverage,
+            "transfer_coverage_denominator": coverage_denominator,
             "objective1_internal_voxels": len(objective1_internal),
             "objective1_exterior_voxels": len(objective1_exterior),
             "removed_objective1_internal_voxels": len(objective1_internal - prediction),
@@ -470,7 +594,7 @@ def main() -> None:
             **transfer_diag,
             **fusion_diag,
         }
-        for method, variant in (("objective1", objective1), ("retrieval_v2", prediction)):
+        for method, variant in (("objective1", objective1), (final_method, prediction)):
             for margin in sorted(args.margins):
                 predicted_internal = interior(variant, margin)
                 metrics = add_derived_metrics(
@@ -529,6 +653,7 @@ def main() -> None:
         args.gallery_categories,
         args.gallery_per_category,
         args.transplant_margin,
+        final_method,
     )
     if gallery:
         write_csv(args.output_dir / "visualization_manifest.csv", gallery)
@@ -548,6 +673,7 @@ def main() -> None:
             "objective1_meshes": str(args.objective1_meshes) if args.objective1_meshes else None,
             "rankings": str(args.rankings),
             "policy": str(args.policy),
+            "policy_method": policy_method,
             "view_index": args.view_index,
             "resolution": args.resolution,
             "transplant_margin": args.transplant_margin,
@@ -557,7 +683,7 @@ def main() -> None:
         }, file, indent=2)
         file.write("\n")
 
-    print("\nHeld-out retrieval-v2 results")
+    print(f"\nHeld-out {final_method} results")
     paired = {row["method"]: row for row in paired_rows}
     for row in summary_rows:
         if int(row["margin"]) != args.transplant_margin:
@@ -572,7 +698,7 @@ def main() -> None:
             f"F1 delta={comparison['mean_internal_f1_delta']:+.4f}, "
             f"W/L/T={comparison['wins']}/{comparison['losses']}/{comparison['ties']}"
         )
-    print(f"Wrote retrieval-v2 results to {args.output_dir}")
+    print(f"Wrote {final_method} results to {args.output_dir}")
 
 
 if __name__ == "__main__":
