@@ -17,6 +17,7 @@ from retrieval_v2 import (
     predict_quality,
     tolerant_f1,
     transfer_supported_components,
+    unmatched_voxels,
 )
 
 
@@ -25,6 +26,8 @@ class RetrievalV2Tests(unittest.TestCase):
         left = {(10, 10, 10)}
         right = {(11, 10, 10)}
         self.assertEqual(tolerant_f1(left, right, 1.0), 1.0)
+        self.assertEqual(unmatched_voxels(left, right, 1.0), set())
+        self.assertEqual(unmatched_voxels({(9, 10, 10)}, right, 1.0), {(9, 10, 10)})
 
     def test_alignment_is_small_and_improves_shifted_surface(self) -> None:
         source = {(x, 10, 10) for x in range(10, 30)}

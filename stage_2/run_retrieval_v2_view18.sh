@@ -22,8 +22,8 @@ POLICY="$CALIBRATION_DIR/policy.json"
 
 cd "$REPO_ROOT"
 
-if ! "$PYTHON_BIN" -c 'import scipy, trimesh' >/dev/null 2>&1; then
-    echo "Missing retrieval-v2 dependencies. Run: $PYTHON_BIN -m pip install scipy trimesh" >&2
+if ! "$PYTHON_BIN" -c 'import trimesh' >/dev/null 2>&1; then
+    echo "Missing retrieval-v2 dependency. Run: $PYTHON_BIN -m pip install trimesh" >&2
     exit 1
 fi
 "$PYTHON_BIN" stage_2/test_retrieval_v2.py

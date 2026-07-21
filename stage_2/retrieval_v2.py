@@ -39,6 +39,7 @@ AXIS_NEIGHBORS = (
     (0, 0, 1),
     (0, 0, -1),
 )
+_OFFSET_CACHE: dict[int, np.ndarray] = {}
 
 
 @dataclass(frozen=True)
@@ -113,7 +114,57 @@ def exact_f1(left: set[Voxel], right: set[Voxel]) -> float:
 def _points(voxels: set[Voxel]) -> np.ndarray:
     if not voxels:
         return np.empty((0, 3), dtype=np.float64)
-    return np.asarray(sorted(voxels), dtype=np.float64)
+    # Geometry below is order-independent. Avoiding an O(n log n) Python sort
+    # matters because each top-20 query performs many voxel comparisons.
+    return np.asarray(list(voxels), dtype=np.float64)
+
+
+def _tolerant_membership(
+    source: set[Voxel], target: set[Voxel], tolerance: float
+) -> tuple[list[Voxel], np.ndarray]:
+    """Match integer voxels with an inclusive L-infinity radius.
+
+    A dense local lookup is substantially faster here than constructing a
+    SciPy KD-tree for every small 64^3 voxel comparison.  Every call site uses
+    integer voxel coordinates and an integer tolerance, so this is also an
+    exact implementation of the intended matching rule.
+    """
+    if tolerance < 0 or tolerance != int(tolerance):
+        raise ValueError("voxel tolerance must be a non-negative integer")
+    ordered = list(source)
+    if not ordered or not target:
+        return ordered, np.zeros(len(ordered), dtype=bool)
+
+    radius = int(tolerance)
+    source_points = np.asarray(ordered, dtype=np.int32)
+    target_points = np.asarray(list(target), dtype=np.int32)
+    minimum = np.minimum(
+        source_points.min(axis=0), target_points.min(axis=0) - radius
+    )
+    maximum = np.maximum(
+        source_points.max(axis=0), target_points.max(axis=0) + radius
+    )
+    shape = tuple((maximum - minimum + 1).tolist())
+    lookup = np.zeros(shape, dtype=bool)
+
+    offsets = _OFFSET_CACHE.get(radius)
+    if offsets is None:
+        offsets = np.asarray(
+            [
+                (dx, dy, dz)
+                for dx in range(-radius, radius + 1)
+                for dy in range(-radius, radius + 1)
+                for dz in range(-radius, radius + 1)
+            ],
+            dtype=np.int32,
+        )
+        _OFFSET_CACHE[radius] = offsets
+    expanded = (
+        target_points[:, None, :] + offsets[None, :, :] - minimum
+    ).reshape(-1, 3)
+    lookup[tuple(expanded.T)] = True
+    shifted_source = source_points - minimum
+    return ordered, lookup[tuple(shifted_source.T)]
 
 
 def tolerant_overlap_fraction(
@@ -124,42 +175,8 @@ def tolerant_overlap_fraction(
         return 1.0 if not target else 0.0
     if not target:
         return 0.0
-    try:
-        from scipy.spatial import cKDTree
-    except ImportError:  # Small NumPy fallback; SciPy is much faster for full runs.
-        if tolerance != int(tolerance) or tolerance < 0:
-            raise ValueError("NumPy fallback requires a non-negative integer tolerance")
-        radius = int(tolerance)
-        target_points = np.asarray(sorted(target), dtype=np.int32)
-        offsets = np.asarray(
-            [
-                (dx, dy, dz)
-                for dx in range(-radius, radius + 1)
-                for dy in range(-radius, radius + 1)
-                for dz in range(-radius, radius + 1)
-            ],
-            dtype=np.int32,
-        )
-        expanded = (target_points[:, None, :] + offsets[None, :, :]).reshape(-1, 3)
-        source_points = np.asarray(sorted(source), dtype=np.int32)
-        minimum = np.minimum(expanded.min(axis=0), source_points.min(axis=0))
-        maximum = np.maximum(expanded.max(axis=0), source_points.max(axis=0))
-        span = maximum - minimum + 1
-
-        def encode(points: np.ndarray) -> np.ndarray:
-            shifted = points - minimum
-            return (shifted[:, 0] * span[1] + shifted[:, 1]) * span[2] + shifted[:, 2]
-
-        return float(np.mean(np.isin(encode(source_points), np.unique(encode(expanded)))))
-    else:
-        inclusive_bound = float(np.nextafter(tolerance, np.inf))
-        distances, _ = cKDTree(_points(target)).query(
-            _points(source),
-            k=1,
-            p=np.inf,
-            distance_upper_bound=inclusive_bound,
-        )
-        return float(np.mean(np.isfinite(distances)))
+    _ordered, matched = _tolerant_membership(source, target, tolerance)
+    return float(np.mean(matched))
 
 
 def tolerant_f1(
@@ -420,7 +437,8 @@ def transfer_supported_components(
     """Transfer complete aligned donor components and retain provenance."""
     candidates = []
     rejected_small = rejected_clipped = rejected_fragmented = rejected_support = 0
-    for original_component in connected_components(donor_internal):
+    donor_components = connected_components(donor_internal)
+    for original_component in donor_components:
         aligned_whole = align_voxels(original_component, alignment, resolution)
         clipped = aligned_whole & safe_volume
         if len(clipped) < preset.min_component_voxels:
@@ -464,7 +482,7 @@ def transfer_supported_components(
 
     return transferred, accepted_source, {
         "donor_internal_voxels": len(donor_internal),
-        "donor_components": len(connected_components(donor_internal)),
+        "donor_components": len(donor_components),
         "eligible_components": len(candidates),
         "kept_components": kept,
         "transferred_voxels": len(transferred),
@@ -483,28 +501,8 @@ def unmatched_voxels(
 ) -> set[Voxel]:
     if not source or not reference:
         return set(source)
-    ordered = sorted(source)
-    try:
-        from scipy.spatial import cKDTree
-    except ImportError:
-        return {
-            voxel
-            for voxel in ordered
-            if tolerant_overlap_fraction({voxel}, reference, tolerance) == 0.0
-        }
-    else:
-        inclusive_bound = float(np.nextafter(tolerance, np.inf))
-        distances, _ = cKDTree(_points(reference)).query(
-            np.asarray(ordered, dtype=np.float64),
-            k=1,
-            p=np.inf,
-            distance_upper_bound=inclusive_bound,
-        )
-        return {
-            voxel
-            for voxel, distance in zip(ordered, distances)
-            if not np.isfinite(distance)
-        }
+    ordered, matched = _tolerant_membership(source, reference, tolerance)
+    return {voxel for voxel, is_matched in zip(ordered, matched) if not is_matched}
 
 
 def hybrid_fusion(
