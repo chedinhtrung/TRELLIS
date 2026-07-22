@@ -227,8 +227,19 @@ def write_csv(path: Path, rows: list[dict], fieldnames: list[str] | None = None)
     if not rows:
         raise ValueError(f"Refusing to write an empty CSV: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
+    if fieldnames is None:
+        # Preserve the first row's readable order, then append any diagnostic
+        # fields introduced by later method variants. DictWriter otherwise
+        # crashes after a complete evaluation if row schemas differ.
+        fieldnames = list(rows[0])
+        seen = set(fieldnames)
+        for row in rows[1:]:
+            for name in row:
+                if name not in seen:
+                    fieldnames.append(name)
+                    seen.add(name)
     with path.open("w", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames or list(rows[0]))
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 

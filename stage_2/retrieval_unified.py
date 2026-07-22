@@ -237,7 +237,6 @@ def _fusion_diagnostics(
     budget: int,
 ) -> dict[str, int]:
     return {
-        "model_type": "ridge",
         "protected_objective1_voxels": len(base - safe),
         "unmatched_objective1_voxels": 0,
         "eligible_objective1_components": 0,

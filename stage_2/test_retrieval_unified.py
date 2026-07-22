@@ -284,6 +284,12 @@ class RetrievalUnifiedTests(unittest.TestCase):
             {candidate["action"] for candidate in candidates},
             {COMPONENT_ACTION, STRUCTURAL_ACTION},
         )
+        fusion_schemas = {
+            tuple(sorted(candidate["fusion_diagnostics"]))
+            for candidate in candidates
+        }
+        self.assertEqual(len(fusion_schemas), 1)
+        self.assertNotIn("model_type", next(iter(fusion_schemas)))
         for candidate in candidates:
             self.assertTrue(candidate["transferred"])
             self.assertLessEqual(candidate["transferred"], safe)
