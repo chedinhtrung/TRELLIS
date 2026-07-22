@@ -403,3 +403,5 @@ __pycache__/
 /ShapeNet
 /results
 /experimental
+
+.DS_Store
