@@ -141,6 +141,73 @@ def build_model(model_cfg):
     if categories is not None:
         model.enable_category_conditioning(categories)
         print(f'Enabled category conditioning: {categories}')
+
+    init_lora_ckpt = model_cfg.get('init_lora_ckpt', None)
+    if init_lora_ckpt is not None:
+        lora_keys = {
+            name
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+            and (name.endswith('.lora_down') or name.endswith('.lora_up'))
+        }
+        if not lora_keys:
+            raise ValueError('init_lora_ckpt requires LoRA to be configured for the model.')
+
+        state_dict = torch.load(init_lora_ckpt, map_location='cpu', weights_only=True)
+        if not isinstance(state_dict, dict):
+            raise ValueError(f'LoRA checkpoint must contain a state dict: {init_lora_ckpt}')
+
+        missing_lora = sorted(lora_keys - set(state_dict))
+        unexpected = sorted(set(state_dict) - lora_keys)
+        if missing_lora or unexpected:
+            raise ValueError(
+                f'Invalid LoRA initialization checkpoint {init_lora_ckpt}: '
+                f'missing={missing_lora}, unexpected={unexpected}'
+            )
+
+        incompatible = model.load_state_dict(state_dict, strict=False)
+        unexpected = sorted(incompatible.unexpected_keys)
+        missing_lora = sorted(lora_keys.intersection(incompatible.missing_keys))
+        if missing_lora or unexpected:
+            raise ValueError(
+                f'Failed to initialize LoRA from {init_lora_ckpt}: '
+                f'missing={missing_lora}, unexpected={unexpected}'
+            )
+        print(f'Initialized LoRA from {init_lora_ckpt}')
+
+    coordinate_head_cfg = model_cfg.get('coordinate_head', None)
+    if coordinate_head_cfg is not None:
+        if not hasattr(model, 'enable_coordinate_head'):
+            raise ValueError(f'{model.__class__.__name__} does not support a coordinate head')
+        if coordinate_head_cfg.get('freeze_backbone', False):
+            for parameter in model.parameters():
+                parameter.requires_grad_(False)
+        model.enable_coordinate_head(
+            hidden_channels=coordinate_head_cfg.get('hidden_channels', 64),
+            output_resolution=coordinate_head_cfg.get('output_resolution', 64),
+            residual_scale=coordinate_head_cfg.get('residual_scale', 20.0),
+            base_logit_clip=coordinate_head_cfg.get('base_logit_clip', 10.0),
+        )
+        trainable_names = [
+            name for name, parameter in model.named_parameters() if parameter.requires_grad
+        ]
+        if coordinate_head_cfg.get('freeze_backbone', False) and any(
+            not name.startswith('coordinate_head.') for name in trainable_names
+        ):
+            raise RuntimeError('Coordinate-head-only training left backbone parameters trainable')
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        print(f'Enabled coordinate head: {trainable} trainable parameters')
+
+    interior_expert_cfg = model_cfg.get('interior_expert', None)
+    if interior_expert_cfg is not None:
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        model.enable_interior_expert(
+            hidden_channels=interior_expert_cfg.get('hidden_channels', 256),
+            margin=interior_expert_cfg.get('margin', 2),
+        )
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        print(f'Enabled interior expert: {trainable} trainable parameters')
     return model
 
 

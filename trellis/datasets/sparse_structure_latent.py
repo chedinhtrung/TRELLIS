@@ -6,6 +6,7 @@ import torch
 import utils3d
 from ..representations.octree import DfsOctree as Octree
 from ..renderers import OctreeRenderer
+from ..modules.sparse.geometry import axis_interior_mask
 from .components import StandardDatasetBase, TextConditionedMixin, ImageConditionedMixin
 from .. import models
 
@@ -136,11 +137,22 @@ class SparseStructureLatent(SparseStructureLatentVisMixin, StandardDatasetBase):
         pretrained_ss_dec: str = 'microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16',
         ss_dec_path: Optional[str] = None,
         ss_dec_ckpt: Optional[str] = None,
+        load_occupancy: bool = False,
+        occupancy_resolution: int = 64,
+        interior_margin: int = 2,
     ):
         self.latent_model = latent_model
         self.min_aesthetic_score = min_aesthetic_score
         self.normalization = normalization
+        self.load_occupancy = load_occupancy
+        self.occupancy_resolution = occupancy_resolution
+        self.interior_margin = interior_margin
         self.value_range = (0, 1)
+
+        if self.occupancy_resolution <= 0:
+            raise ValueError('occupancy_resolution must be positive')
+        if self.interior_margin < 1:
+            raise ValueError('interior_margin must be at least 1')
         
         super().__init__(
             roots,
@@ -157,6 +169,11 @@ class SparseStructureLatent(SparseStructureLatentVisMixin, StandardDatasetBase):
         stats = {}
         metadata = metadata[metadata[f'ss_latent_{self.latent_model}']]
         stats['With sparse structure latents'] = len(metadata)
+        if self.load_occupancy:
+            if 'voxelized' not in metadata:
+                raise ValueError('Metadata must contain a voxelized column when load_occupancy is enabled')
+            metadata = metadata[metadata['voxelized']]
+            stats['Voxelized'] = len(metadata)
         metadata = metadata[metadata['aesthetic_score'] >= self.min_aesthetic_score]
         stats[f'Aesthetic score >= {self.min_aesthetic_score}'] = len(metadata)
         return metadata, stats
@@ -170,6 +187,39 @@ class SparseStructureLatent(SparseStructureLatentVisMixin, StandardDatasetBase):
         pack = {
             'x_0': z,
         }
+
+        if self.load_occupancy:
+            position = utils3d.io.read_ply(os.path.join(root, 'voxels', f'{instance}.ply'))[0]
+            coords = torch.floor(
+                (torch.as_tensor(position, dtype=torch.float32) + 0.5) * self.occupancy_resolution
+            ).long()
+            coords = coords.clamp(0, self.occupancy_resolution - 1)
+            coords = torch.unique(coords, dim=0)
+
+            occupancy = torch.zeros(
+                1,
+                self.occupancy_resolution,
+                self.occupancy_resolution,
+                self.occupancy_resolution,
+                dtype=torch.bool,
+            )
+            occupancy[0, coords[:, 0], coords[:, 1], coords[:, 2]] = True
+
+            batched_coords = torch.cat(
+                [torch.zeros(coords.shape[0], 1, dtype=torch.long), coords],
+                dim=1,
+            )
+            internal_coords = coords[axis_interior_mask(batched_coords, self.interior_margin)]
+            internal_occupancy = torch.zeros_like(occupancy)
+            internal_occupancy[
+                0,
+                internal_coords[:, 0],
+                internal_coords[:, 1],
+                internal_coords[:, 2],
+            ] = True
+
+            pack['occupancy'] = occupancy
+            pack['internal_occupancy'] = internal_occupancy
         return pack
     
 
@@ -185,4 +235,3 @@ class ImageConditionedSparseStructureLatent(ImageConditionedMixin, SparseStructu
     Image-conditioned sparse structure dataset
     """
     pass
-    

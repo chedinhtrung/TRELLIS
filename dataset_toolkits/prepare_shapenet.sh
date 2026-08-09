@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-SHAPENET_ROOT="${SHAPENET_ROOT:-$REPO_ROOT/datasets/ShapeNet}"
+SHAPENET_ROOT="${SHAPENET_ROOT:-$REPO_ROOT/ShapeNet}"
 SHAPENET_PROCESSED="${SHAPENET_PROCESSED:-$REPO_ROOT/datasets/ShapeNetTRELLIS_full}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 MAX_WORKERS="${MAX_WORKERS:-1}"
@@ -12,7 +12,7 @@ export ATTN_BACKEND="${ATTN_BACKEND:-sdpa}"
 
 cd "$REPO_ROOT/dataset_toolkits"
 
-echo "[stage1] Preparing all ShapeNet objects in the four project categories"
+echo "[data-preparation] Preparing all ShapeNet objects in the four project categories"
 "$PYTHON_BIN" shapenet/shapenet_to_trellis_raw.py \
     --shapenet-root "$SHAPENET_ROOT" \
     --categories car bus file_cabinet cabinet \
@@ -20,7 +20,7 @@ echo "[stage1] Preparing all ShapeNet objects in the four project categories"
 
 for split in train val test; do
     split_dir="$SHAPENET_PROCESSED/$split"
-    echo "[stage1] Rendering 40 ordinary and 40 conditioning views for $split"
+    echo "[data-preparation] Rendering 40 ordinary and 40 conditioning views for $split"
 
     "$PYTHON_BIN" render_kiui.py ShapeNet \
         --output_dir "$split_dir" \
@@ -39,25 +39,25 @@ for split in train val test; do
     wait "$render_pid"
     wait "$cond_render_pid"
 
-    echo "[stage1] Updating metadata for $split"
+    echo "[data-preparation] Updating metadata for $split"
     "$PYTHON_BIN" shapenet/ensure_metadata_compliance.py \
         --metadata "$split_dir/metadata.csv"
     "$PYTHON_BIN" build_metadata.py ShapeNet \
         --output_dir "$split_dir"
 
-    echo "[stage1] Voxelizing $split"
+    echo "[data-preparation] Voxelizing $split"
     "$PYTHON_BIN" voxelize.py ShapeNet \
         --output_dir "$split_dir"
     "$PYTHON_BIN" build_metadata.py ShapeNet \
         --output_dir "$split_dir"
 
-    echo "[stage1] Extracting DINOv2 features for $split"
+    echo "[data-preparation] Extracting DINOv2 features for $split"
     "$PYTHON_BIN" extract_feature.py \
         --output_dir "$split_dir"
     "$PYTHON_BIN" build_metadata.py ShapeNet \
         --output_dir "$split_dir"
 
-    echo "[stage1] Encoding SS and SLAT latents for $split"
+    echo "[data-preparation] Encoding SS and SLAT latents for $split"
     "$PYTHON_BIN" encode_ss_latent.py \
         --output_dir "$split_dir" &
     ss_latent_pid=$!
@@ -73,4 +73,4 @@ for split in train val test; do
         --output_dir "$split_dir"
 done
 
-echo "[stage1] ShapeNet preparation complete: $SHAPENET_PROCESSED"
+echo "[data-preparation] ShapeNet preparation complete: $SHAPENET_PROCESSED"
