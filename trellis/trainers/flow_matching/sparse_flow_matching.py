@@ -61,14 +61,15 @@ class SparseFlowMatchingTrainer(FlowMatchingTrainer):
     def axis_extrema_surface_mask(self, coords_xyz: torch.Tensor) -> torch.Tensor:
         """Return a boolean mask of voxels on the surface of the object (visible).
 
-        A voxel is marked as surface if it is the min/max index along x, y, or z
-        within any 1D axis-aligned line.
+        A voxel is marked as surface if it is within the min/max 3 occupied
+        positions along x, y, or z within any 1D axis-aligned line.
         """
         num_points = coords_xyz.shape[0]
         if num_points == 0:
             return torch.zeros(0, dtype=torch.bool, device=coords_xyz.device)
 
         surface_mask = torch.zeros(num_points, dtype=torch.bool, device=coords_xyz.device)
+        surface_layers = 3
 
         def mark_extrema(group_cols: List[int], value_col: int) -> None:
             keys = coords_xyz[:, group_cols]
@@ -79,10 +80,12 @@ class SparseFlowMatchingTrainer(FlowMatchingTrainer):
                 if group_idx.numel() == 0:
                     continue
                 group_vals = values[group_idx]
-                min_idx = group_idx[torch.argmin(group_vals)]
-                max_idx = group_idx[torch.argmax(group_vals)]
-                surface_mask[min_idx] = True
-                surface_mask[max_idx] = True
+                k = min(surface_layers, group_idx.numel())
+                order = torch.argsort(group_vals)
+                min_indices = group_idx[order[:k]]
+                max_indices = group_idx[order[-k:]]
+                surface_mask[min_indices] = True
+                surface_mask[max_indices] = True
 
         mark_extrema([1, 2], 0)  # x-extrema along each (y, z) line
         mark_extrema([0, 2], 1)  # y-extrema along each (x, z) line
