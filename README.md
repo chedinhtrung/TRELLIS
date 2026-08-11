@@ -204,13 +204,11 @@ held-out shapes with conditioning view 18, seed 42, sparse-coordinate threshold
 isolates the effect of the three fine-tuned adapters while keeping inference
 settings fixed.
 
-| Category | Samples | Precision (original -> fine-tuned) | Recall (original -> fine-tuned) | F1 (original -> fine-tuned) | F1 gain | F0.5 (original -> fine-tuned) | Predicted/GT internal volume (original -> fine-tuned) |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| All | 195 | 0.2437 -> 0.2994 | 0.0920 -> 0.3346 | 0.1185 -> 0.2922 | **+0.1737 (+146.58%)** | 0.1594 -> 0.2880 | 0.471 -> 1.673 |
-| Bus | 30 | 0.2761 -> 0.2938 | 0.0827 -> 0.4312 | 0.1129 -> 0.3340 | **+0.2211 (+195.87%)** | 0.1598 -> 0.3069 | 0.388 -> 2.011 |
-| Cabinet | 50 | 0.1308 -> 0.1751 | 0.0711 -> 0.2295 | 0.0733 -> 0.1602 | **+0.0869 (+118.55%)** | 0.0882 -> 0.1567 | 0.605 -> 2.589 |
-| Car | 100 | 0.3009 -> 0.3850 | 0.1093 -> 0.3866 | 0.1485 -> 0.3719 | **+0.2234 (+150.46%)** | 0.2032 -> 0.3743 | 0.397 -> 1.091 |
-| File cabinet | 15 | 0.1733 -> 0.1539 | 0.0657 -> 0.1449 | 0.0805 -> 0.1172 | **+0.0367 (+45.66%)** | 0.1040 -> 0.1120 | 0.676 -> 1.817 |
+| Method            | Precision   |  Recall   |      F1   |      CD   |
+| ----------------- | ----------: | --------: | --------: | --------: |
+| TRELLIS           |       0.198 |     0.081 |     0.102 |     0.075 |
+| Fine-tuned        |       0.246 |     0.277 |     0.242 | **0.043** |
+
 
 
 ### **Train the three LoRAs**
@@ -420,13 +418,11 @@ The retrieval method is paired against the fine-tuned TRELLIS output for the
 same 195 held-out objects at margin 2. The values below are read from
 `results/retrieval_unified_view18/summary.csv` and `category_summary.csv`:
 
-| Category | Precision (fine-tuned -> retrieval) | F1 (fine-tuned -> retrieval) | F1 gain | F0.5 gain | Internal-volume ratio |
-|---|---:|---:|---:|---:|---:|
-| All | 0.2994 -> 0.3187 | 0.2922 -> 0.3014 | **+0.0092 (+3.14%)** | **+0.0155 (+5.39%)** | 1.673 -> 1.625 |
-| Bus | 0.2938 -> 0.3573 | 0.3340 -> 0.3619 | **+0.0279 (+8.36%)** | **+0.0489 (+15.94%)** | 2.011 -> 1.713 |
-| Car | 0.3850 -> 0.4024 | 0.3719 -> 0.3793 | **+0.0074 (+2.00%)** | **+0.0139 (+3.71%)** | 1.091 -> 1.031 |
-| File cabinet | 0.1539 -> 0.1728 | 0.1172 -> 0.1347 | **+0.0175 (+14.92%)** | **+0.0187 (+16.65%)** | 1.817 -> 1.619 |
-| Cabinet | 0.1751 -> 0.1717 | 0.1602 -> 0.1591 | -0.0011 (-0.67%) | -0.0022 (-1.39%) | 2.589 -> 2.763 |
+
+| Method            | Precision   |  Recall   |      F1   |      CD   |
+| ----------------- | ----------: | --------: | --------: | --------: |
+| Fine-tuned        |       0.246 |     0.277 |     0.242 | **0.043** |
+| Retrieval-refined |   **0.319** | **0.352** | **0.256** |     0.044 |
 
 
 ### **Calibrate the Final Policy from Scratch**
