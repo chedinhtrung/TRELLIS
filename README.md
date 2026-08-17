@@ -1,7 +1,7 @@
 # **Single-Image Internal 3D Geometry Generation with TRELLIS**
 
 This project adapts image-conditioned TRELLIS to reconstruct semantically
-meaningful `internal 3D geometry` from a single exterior image. The final system
+meaningful `internal 3D geometry` from a single exterior image. The system
 contains two methods:
 
 1. `Interior-aware TRELLIS fine-tuning`: Generates the complete shape,
@@ -11,7 +11,7 @@ contains two methods:
 
 The final implementation supports four ShapeNet categories: `bus`, `cabinet`,
 `car`, and `file_cabinet`. The quantitative results below report all four
-categories. Buses and cars are used as the two headline visual categories: the
+categories. Buses and cars are used as the two headline visual categories: The
 visualization notebook presents the 10 strongest buses and 10 strongest cars as
 half-cut meshes in two stages. The first compares ground truth, original
 TRELLIS, and fine-tuned TRELLIS; the second compares ground truth, fine-tuned
@@ -351,17 +351,12 @@ interior, giving in total 16 possible outputs.
 - Keep a donor component only if it has at least 24 voxels, at least 70% remains after
   clipping to the safe volume, at least 90% of the clipped part stays connected,
   and at least 20% of its voxels are contained in another aligned donor.
-- Insert accepted donor components inside the safe volume. Throw away Pipeline 1 voxels that overlap
-  or lie within 1 voxel of the donor components. Preserve the non-overlapping part of a Pipeline 1 component
-  only if the original component has at least 64 voxels and at most 15% of the component's voxels has neighbors
-  in all directions (prevent blobs). The motivation for combining components is to add the useful missing donor structure without
-  throwing away every useful structure that pipeline 1 already generated.
+- Insert accepted donor components inside the safe volume. Throw away Pipeline 1 voxels that overlap or lie within 1 voxel of the donor components. Preserve the non-overlapping part of a Pipeline 1 component only if the original component has at least 64 voxels and at most 15% of the component's voxels has neighbors in all directions (prevent blobs). The motivation for combining components is to add the useful missing donor structure without throwing away every useful structure that pipeline 1 already generated.
 
 `structural_replace`:
 
 - Split the aligned donor interior into 26 components
-- Keep a donor component only if it has at least 24 voxels, at most 50% of the component's voxels has neighbors in all
-  directions, and at least 10% of its voxels are contained in another aligned donor.
+- Keep a donor component only if it has at least 24 voxels, at most 50% of the component's voxels has neighbors in all directions, and at least 10% of its voxels are contained in another aligned donor.
 - Remove all Pipeline 1 interior voxels inside the safe volume, then insert accepted donor components inside the safe volume.
 
 
